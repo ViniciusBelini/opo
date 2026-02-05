@@ -1,0 +1,4 @@
+<n: int> -> int: fact [
+    n 0 == ? [ 1 ] : [ n n 1 - fact * ]
+]
+"hello" fact !!

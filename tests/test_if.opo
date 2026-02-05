@@ -1,0 +1,13 @@
+10 => x: int
+x 5 > ? [
+    "x is greater than 5" !!
+] : [
+    "x is not greater than 5" !!
+]
+
+3 => x: int
+x 5 > ? [
+    "x is greater than 5" !!
+] : [
+    "x is not greater than 5" !!
+]
