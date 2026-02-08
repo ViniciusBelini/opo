@@ -84,6 +84,52 @@ void vm_run(VM* vm) {
                     case VAL_BOOL: printf(val.as.b_val ? "tru\n" : "fls\n"); break;
                     case VAL_STR: printf("%s\n", vm->strings[val.as.s_idx]); break;
                     case VAL_VOID: printf("void\n"); break;
+                    case VAL_FUNC:
+                    case VAL_FUNC_INT:
+                    case VAL_FUNC_FLT:
+                    case VAL_FUNC_BOOL:
+                    case VAL_FUNC_STR:
+                    case VAL_FUNC_VOID:
+                        printf("<fun at %ld>\n", val.as.i_val);
+                        break;
+                }
+                break;
+            }
+            case OP_LTE: {
+                Value b = vm_pop(vm);
+                Value a = vm_pop(vm);
+                if (a.type == VAL_INT && b.type == VAL_INT) {
+                    vm_push(vm, (Value){VAL_BOOL, {.b_val = a.as.i_val <= b.as.i_val}});
+                } else if (a.type == VAL_FLT && b.type == VAL_FLT) {
+                    vm_push(vm, (Value){VAL_BOOL, {.b_val = a.as.f_val <= b.as.f_val}});
+                } else {
+                    fprintf(stderr, "Type error in LTE\n");
+                    exit(1);
+                }
+                break;
+            }
+            case OP_GTE: {
+                Value b = vm_pop(vm);
+                Value a = vm_pop(vm);
+                if (a.type == VAL_INT && b.type == VAL_INT) {
+                    vm_push(vm, (Value){VAL_BOOL, {.b_val = a.as.i_val >= b.as.i_val}});
+                } else if (a.type == VAL_FLT && b.type == VAL_FLT) {
+                    vm_push(vm, (Value){VAL_BOOL, {.b_val = a.as.f_val >= b.as.f_val}});
+                } else {
+                    fprintf(stderr, "Type error in GTE\n");
+                    exit(1);
+                }
+                break;
+            }
+            case OP_NEG: {
+                Value a = vm_pop(vm);
+                if (a.type == VAL_INT) {
+                    vm_push(vm, (Value){VAL_INT, {.i_val = -a.as.i_val}});
+                } else if (a.type == VAL_FLT) {
+                    vm_push(vm, (Value){VAL_FLT, {.f_val = -a.as.f_val}});
+                } else {
+                    fprintf(stderr, "Type error in NEG\n");
+                    exit(1);
                 }
                 break;
             }
@@ -152,6 +198,9 @@ void vm_run(VM* vm) {
                     vm_push(vm, (Value){VAL_INT, {.i_val = a.as.i_val - b.as.i_val}});
                 } else if (a.type == VAL_FLT && b.type == VAL_FLT) {
                     vm_push(vm, (Value){VAL_FLT, {.f_val = a.as.f_val - b.as.f_val}});
+                } else {
+                    fprintf(stderr, "Type error in SUB\n");
+                    exit(1);
                 }
                 break;
             }
@@ -162,6 +211,9 @@ void vm_run(VM* vm) {
                     vm_push(vm, (Value){VAL_INT, {.i_val = a.as.i_val * b.as.i_val}});
                 } else if (a.type == VAL_FLT && b.type == VAL_FLT) {
                     vm_push(vm, (Value){VAL_FLT, {.f_val = a.as.f_val * b.as.f_val}});
+                } else {
+                    fprintf(stderr, "Type error in MUL\n");
+                    exit(1);
                 }
                 break;
             }
@@ -169,9 +221,14 @@ void vm_run(VM* vm) {
                 Value b = vm_pop(vm);
                 Value a = vm_pop(vm);
                 if (a.type == VAL_INT && b.type == VAL_INT) {
+                    if (b.as.i_val == 0) { fprintf(stderr, "Division by zero\n"); exit(1); }
                     vm_push(vm, (Value){VAL_INT, {.i_val = a.as.i_val / b.as.i_val}});
                 } else if (a.type == VAL_FLT && b.type == VAL_FLT) {
+                    if (b.as.f_val == 0) { fprintf(stderr, "Division by zero\n"); exit(1); }
                     vm_push(vm, (Value){VAL_FLT, {.f_val = a.as.f_val / b.as.f_val}});
+                } else {
+                    fprintf(stderr, "Type error in DIV\n");
+                    exit(1);
                 }
                 break;
             }
@@ -191,6 +248,11 @@ void vm_run(VM* vm) {
                 Value a = vm_pop(vm);
                 if (a.type == VAL_INT && b.type == VAL_INT) {
                     vm_push(vm, (Value){VAL_BOOL, {.b_val = a.as.i_val < b.as.i_val}});
+                } else if (a.type == VAL_FLT && b.type == VAL_FLT) {
+                    vm_push(vm, (Value){VAL_BOOL, {.b_val = a.as.f_val < b.as.f_val}});
+                } else {
+                    fprintf(stderr, "Type error in LT\n");
+                    exit(1);
                 }
                 break;
             }
@@ -240,6 +302,24 @@ void vm_run(VM* vm) {
                 vm->ip = addr;
                 break;
             }
+            case OP_CALL_PTR: {
+                Value val = vm_pop(vm);
+                if (val.type < VAL_FUNC && val.type != VAL_INT) {
+                    fprintf(stderr, "Can only call functions.\n");
+                    exit(1);
+                }
+                int32_t addr = (int32_t)val.as.i_val;
+                if (vm->frame_ptr >= FRAMES_MAX) {
+                    fprintf(stderr, "Stack overflow (frames)\n");
+                    exit(1);
+                }
+                CallFrame* frame = &vm->frames[vm->frame_ptr++];
+                frame->return_addr = vm->ip;
+                frame->locals_offset = (vm->frame_ptr - 1) * LOCALS_PER_FRAME;
+
+                vm->ip = addr;
+                break;
+            }
             case OP_RET: {
                 if (vm->frame_ptr <= 0) {
                     fprintf(stderr, "Stack underflow (frames)\n");
@@ -247,6 +327,19 @@ void vm_run(VM* vm) {
                 }
                 CallFrame* frame = &vm->frames[--vm->frame_ptr];
                 vm->ip = frame->return_addr;
+                break;
+            }
+            case OP_TYPEOF: {
+                Value val = vm_pop(vm);
+                int type_idx = (int)val.type;
+                if (type_idx > 5) type_idx = 5; // All VAL_FUNC* are "fun"
+                vm_push(vm, (Value){VAL_STR, {.s_idx = type_idx}});
+                break;
+            }
+            case OP_PUSH_FUNC: {
+                int64_t addr = read_int64(vm);
+                uint8_t type = vm->code[vm->ip++];
+                vm_push(vm, (Value){(ValueType)type, {.i_val = addr}});
                 break;
             }
             default:

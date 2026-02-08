@@ -12,12 +12,15 @@ typedef enum {
     OP_PUSH_BOOL,
     OP_ADD,
     OP_SUB,
+    OP_NEG,
     OP_MUL,
     OP_DIV,
     OP_MOD,
     OP_EQ,
     OP_LT,
     OP_GT,
+    OP_LTE,
+    OP_GTE,
     OP_AND,
     OP_OR,
     OP_NOT,
@@ -27,7 +30,10 @@ typedef enum {
     OP_JUMP,
     OP_JUMP_IF_F,
     OP_CALL,
-    OP_RET
+    OP_CALL_PTR,
+    OP_RET,
+    OP_TYPEOF,
+    OP_PUSH_FUNC
 } OpCode;
 
 typedef enum {
@@ -35,7 +41,13 @@ typedef enum {
     VAL_FLT,
     VAL_BOOL,
     VAL_STR,
-    VAL_VOID
+    VAL_VOID,
+    VAL_FUNC,
+    VAL_FUNC_INT,
+    VAL_FUNC_FLT,
+    VAL_FUNC_BOOL,
+    VAL_FUNC_STR,
+    VAL_FUNC_VOID
 } ValueType;
 
 typedef struct {

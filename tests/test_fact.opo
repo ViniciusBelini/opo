@@ -1,9 +1,11 @@
-<n: int> -> int: fact [
-    n 0 == ? [
+<n: int> -> int: factorial [
+    n == 0 ? [
         1
     ] : [
-        n n 1 - fact *
+        n * factorial(n - 1)
     ]
 ]
 
-5 fact !!
+<> -> void: main [
+    factorial(5) !!
+]
