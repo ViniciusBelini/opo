@@ -7,15 +7,21 @@ typedef enum {
     TOKEN_ARROW,    // ->
     TOKEN_ASSIGN,   // =>
     TOKEN_COLON,    // :
+    TOKEN_SEMICOLON,// ;
+    TOKEN_COMMA,    // ,
     TOKEN_QUESTION, // ?
     TOKEN_AT,       // @
     TOKEN_LBRACKET, // [
     TOKEN_RBRACKET, // ]
+    TOKEN_LPAREN,   // (
+    TOKEN_RPAREN,   // )
     TOKEN_LANGLE,   // <
     TOKEN_RANGLE,   // >
     TOKEN_PLUS, TOKEN_MINUS, TOKEN_STAR, TOKEN_SLASH, TOKEN_PERCENT,
     TOKEN_BANG,     // !
     TOKEN_BANG_BANG,// !!
+    TOKEN_AND,      // &&
+    TOKEN_OR,       // ||
     TOKEN_EQ_EQ,    // ==
     TOKEN_BANG_EQ,  // !=
     TOKEN_LTE, TOKEN_GTE,

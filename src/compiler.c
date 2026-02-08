@@ -124,6 +124,11 @@ static int resolve_local(CompilerState* state, Token* name) {
     return -1;
 }
 
+static bool match(TokenType type) {
+    if (parser.current.type != type) return false;
+    advance();
+    return true;
+}
 
 static void add_local(Token name, ValueType type) {
     if (current_compiler->local_count == 256) {
@@ -164,98 +169,257 @@ static ValueType parse_type() {
     return VAL_VOID;
 }
 
+typedef enum {
+    PREC_NONE,
+    PREC_ASSIGNMENT,  // =>
+    PREC_POSTFIX,     // !!
+    PREC_OR,          // ||
+    PREC_AND,         // &&
+    PREC_EQUALITY,    // == !=
+    PREC_COMPARISON,  // < > <= >=
+    PREC_TERM,        // + -
+    PREC_FACTOR,      // * / %
+    PREC_UNARY,       // ! -
+    PREC_CALL,        // ()
+    PREC_PRIMARY
+} Precedence;
+
+typedef void (*ParseFn)();
+
+typedef struct {
+    ParseFn prefix;
+    ParseFn infix;
+    Precedence precedence;
+} ParseRule;
+
+static void parse_precedence(Precedence precedence);
+static ParseRule* get_rule(TokenType type);
+
 static void expression() {
-    for (;;) {
-        if (parser.current.type == TOKEN_INT) {
-            int64_t val = strtoll(parser.current.start, NULL, 10);
-            emit_int(val);
+    parse_precedence(PREC_ASSIGNMENT);
+}
+
+static void binary() {
+    TokenType operator_type = parser.previous.type;
+    ParseRule* rule = get_rule(operator_type);
+    parse_precedence((Precedence)(rule->precedence + 1));
+
+    ValueType b = type_pop();
+    ValueType a = type_pop();
+
+    switch (operator_type) {
+        case TOKEN_PLUS:
+        case TOKEN_MINUS:
+        case TOKEN_STAR:
+        case TOKEN_SLASH:
+            if (a != b || (a != VAL_INT && a != VAL_FLT)) {
+                error_at(&parser.previous, "Arithmetic type error.");
+            }
+            if (operator_type == TOKEN_PLUS) emit_byte(OP_ADD);
+            else if (operator_type == TOKEN_MINUS) emit_byte(OP_SUB);
+            else if (operator_type == TOKEN_STAR) emit_byte(OP_MUL);
+            else if (operator_type == TOKEN_SLASH) emit_byte(OP_DIV);
+            type_push(a);
+            break;
+        case TOKEN_PERCENT:
+            if (a != VAL_INT || b != VAL_INT) {
+                error_at(&parser.previous, "Modulo type error.");
+            }
+            emit_byte(OP_MOD);
             type_push(VAL_INT);
-            advance();
-        } else if (parser.current.type == TOKEN_STR) {
-            int idx = add_string(parser.current.start + 1, parser.current.length - 2);
-            emit_bytes(OP_PUSH_STR, (uint8_t)idx);
-            type_push(VAL_STR);
-            advance();
-        } else if (parser.current.type == TOKEN_BOOL) {
-            bool val = parser.current.start[0] == 't';
+            break;
+        case TOKEN_EQ_EQ:
+        case TOKEN_BANG_EQ:
+        case TOKEN_LANGLE:
+        case TOKEN_RANGLE:
+        case TOKEN_LTE:
+        case TOKEN_GTE:
+            if (a != b) error_at(&parser.previous, "Comparison type error.");
+            if (operator_type == TOKEN_EQ_EQ) emit_byte(OP_EQ);
+            else if (operator_type == TOKEN_BANG_EQ) {
+                emit_byte(OP_EQ);
+                emit_byte(OP_NOT);
+            }
+            else if (operator_type == TOKEN_LANGLE) emit_byte(OP_LT);
+            else if (operator_type == TOKEN_RANGLE) emit_byte(OP_GT);
+            else if (operator_type == TOKEN_LTE) emit_byte(OP_LTE);
+            else if (operator_type == TOKEN_GTE) emit_byte(OP_GTE);
+            type_push(VAL_BOOL);
+            break;
+        case TOKEN_AND:
+        case TOKEN_OR:
+            if (a != VAL_BOOL || b != VAL_BOOL) error_at(&parser.previous, "Logic type error.");
+            emit_byte(operator_type == TOKEN_AND ? OP_AND : OP_OR);
+            type_push(VAL_BOOL);
+            break;
+        default: return;
+    }
+}
+
+static void unary() {
+    TokenType operator_type = parser.previous.type;
+    parse_precedence(PREC_UNARY);
+    ValueType t = type_pop();
+    if (operator_type == TOKEN_MINUS) {
+        if (t != VAL_INT && t != VAL_FLT) error_at(&parser.previous, "Operand must be a number.");
+        emit_byte(OP_NEG);
+    } else if (operator_type == TOKEN_BANG) {
+        if (t != VAL_BOOL) error_at(&parser.previous, "Operand must be a boolean.");
+        emit_byte(OP_NOT);
+    }
+    type_push(t);
+}
+
+static void grouping() {
+    expression();
+    consume(TOKEN_RPAREN, "Expect ')' after expression.");
+}
+
+static void number() {
+    if (parser.previous.type == TOKEN_INT) {
+        int64_t val = strtoll(parser.previous.start, NULL, 10);
+        emit_int(val);
+        type_push(VAL_INT);
+    } else {
+        double val = strtod(parser.previous.start, NULL);
+        emit_byte(OP_PUSH_FLT);
+        union { double f; uint64_t u; } conv;
+        conv.f = val;
+        for (int i = 0; i < 8; i++) {
+            emit_byte((conv.u >> (i * 8)) & 0xFF);
+        }
+        type_push(VAL_FLT);
+    }
+}
+
+static void string() {
+    int idx = add_string(parser.previous.start + 1, parser.previous.length - 2);
+    emit_bytes(OP_PUSH_STR, (uint8_t)idx);
+    type_push(VAL_STR);
+}
+
+static void literal() {
+    switch (parser.previous.type) {
+        case TOKEN_BOOL: {
+            bool val = parser.previous.start[0] == 't';
             emit_bytes(OP_PUSH_BOOL, val ? 1 : 0);
             type_push(VAL_BOOL);
-            advance();
-        } else if (parser.current.type == TOKEN_ID) {
-            Token name = parser.current;
-            advance();
-            int arg = resolve_local(current_compiler, &name);
-            if (arg != -1) {
-                emit_bytes(OP_LOAD, (uint8_t)arg);
-                type_push(current_compiler->locals[arg].type);
-            } else {
-                int f_idx = -1;
-                for (int i = 0; i < current_compiler->function_count; i++) {
-                    if (name.length == current_compiler->functions[i].name.length &&
-                        memcmp(name.start, current_compiler->functions[i].name.start, name.length) == 0) {
-                        f_idx = i; break;
-                    }
-                }
-                if (f_idx != -1) {
-                    Function* f = &current_compiler->functions[f_idx];
-                    // Check params
-                    for (int i = f->param_count - 1; i >= 0; i--) {
-                        ValueType t = type_pop();
-                        if (t != f->param_types[i]) error_at(&name, "Type mismatch in function call.");
-                    }
-                    emit_byte(OP_CALL);
-                    patch_int32(current_chunk->count, f->addr);
-                    current_chunk->count += 4;
-                    if (f->return_type != VAL_VOID) type_push(f->return_type);
-                    return;
-                } else {
-                    error_at(&name, "Undefined identifier.");
-                }
-            }
-        } else if (parser.current.type == TOKEN_PLUS || parser.current.type == TOKEN_MINUS ||
-                   parser.current.type == TOKEN_STAR || parser.current.type == TOKEN_SLASH) {
-            ValueType b = type_pop();
-            ValueType a = type_pop();
-            if (a != b || (a != VAL_INT && a != VAL_FLT)) error_at(&parser.current, "Arithmetic type error.");
-            OpCode op = OP_ADD;
-            if (parser.current.type == TOKEN_MINUS) op = OP_SUB;
-            else if (parser.current.type == TOKEN_STAR) op = OP_MUL;
-            else if (parser.current.type == TOKEN_SLASH) op = OP_DIV;
-            advance(); emit_byte(op); type_push(a); return;
-        } else if (parser.current.type == TOKEN_BANG_BANG) {
-            type_pop(); // anything can be printed
-            advance(); emit_byte(OP_PRINT); return;
-        } else if (parser.current.type == TOKEN_EQ_EQ || parser.current.type == TOKEN_LANGLE || parser.current.type == TOKEN_RANGLE) {
-            ValueType b = type_pop();
-            ValueType a = type_pop();
-            if (a != b) error_at(&parser.current, "Comparison type error.");
-            OpCode op = OP_EQ;
-            if (parser.current.type == TOKEN_LANGLE) op = OP_LT;
-            else if (parser.current.type == TOKEN_RANGLE) op = OP_GT;
-            advance(); emit_byte(op); type_push(VAL_BOOL); return;
-        } else if (parser.current.type == TOKEN_ASSIGN) {
-            advance();
-            consume(TOKEN_ID, "Expect variable name after =>");
-            Token var_name = parser.previous;
-            consume(TOKEN_COLON, "Expect : after variable name");
-            ValueType declared_type = parse_type();
-            ValueType value_type = type_pop();
-            if (declared_type != value_type) error_at(&var_name, "Assignment type mismatch.");
-
-            int arg = resolve_local(current_compiler, &var_name);
-            if (arg == -1) {
-                add_local(var_name, declared_type);
-                arg = current_compiler->local_count - 1;
-            }
-            emit_bytes(OP_STORE, (uint8_t)arg);
-            return;
-        } else {
             break;
+        }
+        default: return;
+    }
+}
+
+static void variable() {
+    Token name = parser.previous;
+    if (match(TOKEN_LPAREN)) {
+        int f_idx = -1;
+        for (int i = 0; i < current_compiler->function_count; i++) {
+            if (name.length == current_compiler->functions[i].name.length &&
+                memcmp(name.start, current_compiler->functions[i].name.start, name.length) == 0) {
+                f_idx = i; break;
+            }
+        }
+        if (f_idx == -1) {
+            error_at(&name, "Undefined function.");
+            return;
+        }
+        Function* f = &current_compiler->functions[f_idx];
+        int arg_count = 0;
+        if (parser.current.type != TOKEN_RPAREN) {
+            do {
+                expression();
+                ValueType t = type_pop();
+                if (arg_count < f->param_count) {
+                    if (t != f->param_types[arg_count]) error_at(&parser.previous, "Type mismatch in function call.");
+                }
+                arg_count++;
+            } while (match(TOKEN_COMMA));
+        }
+        consume(TOKEN_RPAREN, "Expect ')' after arguments.");
+        if (arg_count != f->param_count) error_at(&name, "Wrong number of arguments.");
+        emit_byte(OP_CALL);
+        patch_int32(current_chunk->count, f->addr);
+        current_chunk->count += 4;
+        if (f->return_type != VAL_VOID) type_push(f->return_type);
+    } else {
+        int arg = resolve_local(current_compiler, &name);
+        if (arg != -1) {
+            emit_bytes(OP_LOAD, (uint8_t)arg);
+            type_push(current_compiler->locals[arg].type);
+        } else {
+            error_at(&name, "Undefined identifier.");
         }
     }
 }
 
+static void assignment() {
+    consume(TOKEN_ID, "Expect variable name after =>");
+    Token var_name = parser.previous;
+    consume(TOKEN_COLON, "Expect : after variable name");
+    ValueType declared_type = parse_type();
+    ValueType value_type = type_pop();
+    if (declared_type != value_type) error_at(&var_name, "Assignment type mismatch.");
+    int arg = resolve_local(current_compiler, &var_name);
+    if (arg == -1) {
+        add_local(var_name, declared_type);
+        arg = current_compiler->local_count - 1;
+    }
+    emit_bytes(OP_STORE, (uint8_t)arg);
+}
+
+static void print_op() {
+    type_pop();
+    emit_byte(OP_PRINT);
+}
+
+ParseRule rules[] = {
+    [TOKEN_INT]       = {number,   NULL,       PREC_NONE},
+    [TOKEN_FLT]       = {number,   NULL,       PREC_NONE},
+    [TOKEN_STR]       = {string,   NULL,       PREC_NONE},
+    [TOKEN_BOOL]      = {literal,  NULL,       PREC_NONE},
+    [TOKEN_ID]        = {variable, NULL,       PREC_NONE},
+    [TOKEN_PLUS]      = {NULL,     binary,     PREC_TERM},
+    [TOKEN_MINUS]     = {unary,    binary,     PREC_TERM},
+    [TOKEN_STAR]      = {NULL,     binary,     PREC_FACTOR},
+    [TOKEN_SLASH]     = {NULL,     binary,     PREC_FACTOR},
+    [TOKEN_PERCENT]   = {NULL,     binary,     PREC_FACTOR},
+    [TOKEN_BANG]      = {unary,    NULL,       PREC_NONE},
+    [TOKEN_BANG_BANG] = {NULL,     print_op,   PREC_POSTFIX},
+    [TOKEN_AND]       = {NULL,     binary,     PREC_AND},
+    [TOKEN_OR]        = {NULL,     binary,     PREC_OR},
+    [TOKEN_EQ_EQ]     = {NULL,     binary,     PREC_EQUALITY},
+    [TOKEN_BANG_EQ]   = {NULL,     binary,     PREC_EQUALITY},
+    [TOKEN_LANGLE]    = {NULL,     binary,     PREC_COMPARISON},
+    [TOKEN_RANGLE]    = {NULL,     binary,     PREC_COMPARISON},
+    [TOKEN_LTE]       = {NULL,     binary,     PREC_COMPARISON},
+    [TOKEN_GTE]       = {NULL,     binary,     PREC_COMPARISON},
+    [TOKEN_LPAREN]    = {grouping, NULL,       PREC_NONE},
+    [TOKEN_ASSIGN]    = {NULL,     assignment, PREC_ASSIGNMENT},
+    [TOKEN_EOF]       = {NULL,     NULL,       PREC_NONE},
+};
+
+static ParseRule* get_rule(TokenType type) {
+    return &rules[type];
+}
+
+static void parse_precedence(Precedence precedence) {
+    advance();
+    ParseFn prefix_rule = get_rule(parser.previous.type)->prefix;
+    if (prefix_rule == NULL) {
+        error_at(&parser.previous, "Expect expression.");
+        return;
+    }
+    prefix_rule();
+    while (precedence <= get_rule(parser.current.type)->precedence) {
+        advance();
+        ParseFn infix_rule = get_rule(parser.previous.type)->infix;
+        infix_rule();
+    }
+}
+
 static void statement() {
+    if (match(TOKEN_SEMICOLON)) return;
     if (parser.current.type == TOKEN_LBRACKET) {
         advance();
         current_compiler->scope_depth++;
@@ -264,6 +428,7 @@ static void statement() {
         }
         consume(TOKEN_RBRACKET, "Expect ']' after block.");
         current_compiler->scope_depth--;
+        match(TOKEN_SEMICOLON);
     } else {
         int start_addr = current_chunk->count;
         expression();
@@ -290,7 +455,8 @@ static void statement() {
             }
 
             int end_addr = current_chunk->count;
-        patch_int32(jump_patch + 1, end_addr);
+            patch_int32(jump_patch + 1, end_addr);
+            match(TOKEN_SEMICOLON);
         } else if (parser.current.type == TOKEN_AT) {
             advance();
 
@@ -307,7 +473,10 @@ static void statement() {
             }
 
             int end_addr = current_chunk->count;
-        patch_int32(jump_if_f_patch + 1, end_addr);
+            patch_int32(jump_if_f_patch + 1, end_addr);
+            match(TOKEN_SEMICOLON);
+        } else {
+            match(TOKEN_SEMICOLON);
         }
     }
 }
@@ -337,6 +506,7 @@ Chunk* compiler_compile(const char* source) {
     // but for the first test let's just parse everything.
 
     while (parser.current.type != TOKEN_EOF) {
+        if (match(TOKEN_SEMICOLON)) continue;
         if (parser.current.type == TOKEN_LANGLE) {
             int jump_over = current_chunk->count;
             emit_byte(OP_JUMP);
@@ -352,6 +522,7 @@ Chunk* compiler_compile(const char* source) {
                 consume(TOKEN_COLON, "Expect :");
                 param_types[param_count] = parse_type();
                 param_count++;
+                if (parser.current.type == TOKEN_COMMA) advance();
             }
             advance(); // >
             consume(TOKEN_ARROW, "Expect -> after args");

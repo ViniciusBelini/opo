@@ -135,12 +135,16 @@ Token lexer_next_token() {
 
     switch (c) {
         case ':': return make_token(TOKEN_COLON);
+        case ';': return make_token(TOKEN_SEMICOLON);
+        case ',': return make_token(TOKEN_COMMA);
         case '?': return make_token(TOKEN_QUESTION);
         case '@': return make_token(TOKEN_AT);
         case '[': return make_token(TOKEN_LBRACKET);
         case ']': return make_token(TOKEN_RBRACKET);
-        case '<': return make_token(TOKEN_LANGLE);
-        case '>': return make_token(TOKEN_RANGLE);
+        case '(': return make_token(TOKEN_LPAREN);
+        case ')': return make_token(TOKEN_RPAREN);
+        case '<': return match('=') ? make_token(TOKEN_LTE) : make_token(TOKEN_LANGLE);
+        case '>': return match('=') ? make_token(TOKEN_GTE) : make_token(TOKEN_RANGLE);
         case '+': return make_token(TOKEN_PLUS);
         case '-': return match('>') ? make_token(TOKEN_ARROW) : make_token(TOKEN_MINUS);
         case '*': return make_token(TOKEN_STAR);
@@ -152,7 +156,14 @@ Token lexer_next_token() {
             break;
         case '!':
             if (match('!')) return make_token(TOKEN_BANG_BANG);
+            if (match('=')) return make_token(TOKEN_BANG_EQ);
             return make_token(TOKEN_BANG);
+        case '&':
+            if (match('&')) return make_token(TOKEN_AND);
+            break;
+        case '|':
+            if (match('|')) return make_token(TOKEN_OR);
+            break;
         case '"': return string();
     }
 

@@ -5,7 +5,7 @@ Opo is a simple, fast, efficient, and safe programming language designed to be t
 ## Design Principles
 
 - **Not Python-like**: No significant whitespace, static typing, symbolic instead of keyword-heavy.
-- **Not C-like**: Uses postfix notation and different delimiters.
+- **C-like Infix Syntax**: Uses infix notation for arithmetic and comparisons, with C-style function calls.
 - **Predictable**: No hidden magic, no implicit conversions.
 - **Simple**: Small grammar, easy to learn.
 
@@ -24,14 +24,14 @@ Opo is a simple, fast, efficient, and safe programming language designed to be t
 Example:
 `10 => x: int`
 
-### Operations (Postfix)
+### Operations (Infix)
 - Arithmetic: `+`, `-`, `*`, `/`, `%`
 - Comparison: `==`, `!=`, `<`, `>`, `<=`, `>=`
 - Logic: `&&`, `||`, `!`
-- Print: `!!`
+- Print: `!!` (Postfix)
 
 Example:
-`5 10 + !!` (Prints 15)
+`(5 + 10) !!` (Prints 15)
 
 ### Control Flow
 - If-Else: `condition ? [ true_block ] : [ false_block ]`
@@ -43,21 +43,23 @@ Example:
 Example:
 ```
 <n: int> -> int: factorial [
-    n 0 == ? [
+    n == 0 ? [
         1
     ] : [
-        n n 1 - factorial *
+        n * factorial(n - 1)
     ]
 ]
 ```
 
 ### Main Entry Point
-The program starts execution from the `main` function.
+The program starts execution from the `main` function. It should be explicitly called at the end of the script.
 
 ```
 <> -> void: main [
-    5 factorial !!
+    factorial(5) !!
 ]
+
+main()
 ```
 
 ## Implementation
