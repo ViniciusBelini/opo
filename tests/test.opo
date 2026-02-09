@@ -1,5 +1,3 @@
-<> -> void: main [
-    "Hello world!" => msg: str
+<> -> void: main[
 
-    msg.20 !!
 ]

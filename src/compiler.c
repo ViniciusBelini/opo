@@ -205,9 +205,14 @@ static bool match(TokenType type) {
 }
 
 static bool is_assignable(ValueType expected, ValueType actual) {
+    if (expected == VAL_ANY || actual == VAL_ANY) return true;
     if (expected == actual) return true;
-    if (expected == VAL_FUNC && actual >= VAL_FUNC) return true;
-    if (actual == VAL_FUNC && expected >= VAL_FUNC) return true;
+    if (expected == VAL_FUNC && actual >= VAL_FUNC && actual <= VAL_FUNC_VOID) return true;
+    if (actual == VAL_FUNC && expected >= VAL_FUNC && expected <= VAL_FUNC_VOID) return true;
+    if (expected == VAL_OBJ) {
+        return actual == VAL_STR || actual == VAL_MAP || actual == VAL_OBJ;
+    }
+    if (expected == VAL_MAP && actual == VAL_OBJ) return true;
     return false;
 }
 
@@ -258,6 +263,13 @@ static ValueType parse_type() {
         consume(TOKEN_RBRACKET, "Expect ']' after '[' for array type.");
         parse_type();
         return VAL_OBJ;
+    }
+    if (match(TOKEN_LBRACE)) {
+        parse_type(); // key type
+        consume(TOKEN_COLON, "Expect ':' after key type in map type.");
+        parse_type(); // value type
+        consume(TOKEN_RBRACE, "Expect '}' after map type.");
+        return VAL_MAP;
     }
     if (match(TOKEN_LANGLE)) {
         while (parser.current.type != TOKEN_RANGLE && parser.current.type != TOKEN_EOF) {
@@ -451,15 +463,41 @@ static void array_literal() {
     type_push(VAL_OBJ);
 }
 
+static void map_literal() {
+    int count = 0;
+    if (parser.current.type != TOKEN_RBRACE) {
+        do {
+            parse_precedence(PREC_OR);
+            type_pop();
+            consume(TOKEN_ASSIGN, "Expect '=>' between key and value in map literal.");
+            parse_precedence(PREC_OR);
+            type_pop();
+            count++;
+        } while (match(TOKEN_COMMA));
+    }
+    consume(TOKEN_RBRACE, "Expect '}' after map elements.");
+    emit_bytes(OP_MAP, (uint8_t)count);
+    type_push(VAL_MAP);
+}
+
 static void dot() {
+    ValueType lhs_type = type_pop();
+    (void)lhs_type;
     if (match(TOKEN_INT)) {
         int64_t idx = strtoll(parser.previous.start, NULL, 10);
-        emit_byte(OP_PUSH_INT);
-        for (int i = 0; i < 8; i++) {
-            emit_byte((idx >> (i * 8)) & 0xFF);
-        }
+        emit_int(idx);
         emit_byte(OP_INDEX);
-        type_pop();
+        type_push(VAL_OBJ);
+    } else if (match(TOKEN_STR)) {
+        int idx = add_string(parser.previous.start + 1, parser.previous.length - 2);
+        emit_bytes(OP_PUSH_STR, (uint8_t)idx);
+        emit_byte(OP_INDEX);
+        type_push(VAL_OBJ);
+    } else if (match(TOKEN_LPAREN)) {
+        expression();
+        consume(TOKEN_RPAREN, "Expect ')' after expression in dot access.");
+        type_pop(); // index type
+        emit_byte(OP_INDEX);
         type_push(VAL_OBJ);
     } else {
         consume(TOKEN_ID, "Expect member name after '.'.");
@@ -475,10 +513,21 @@ static void dot() {
             }
             if (field_idx != -1) break;
         }
-        if (field_idx == -1) error_at(&name, "Unknown struct field.");
-        emit_bytes(OP_GET_MEMBER, (uint8_t)field_idx);
-        type_pop();
-        type_push(VAL_OBJ);
+
+        if (field_idx != -1) {
+            emit_bytes(OP_GET_MEMBER, (uint8_t)field_idx);
+            type_push(VAL_OBJ);
+        } else {
+            // Try as a variable for dynamic indexing
+            int arg = resolve_local(current_compiler, &name);
+            if (arg != -1) {
+                emit_bytes(OP_LOAD, (uint8_t)arg);
+                emit_byte(OP_INDEX);
+                type_push(VAL_OBJ);
+            } else {
+                error_at(&name, "Unknown struct field or index variable.");
+            }
+        }
     }
 }
 
@@ -778,7 +827,24 @@ static void assignment() {
         if (arg == -1) error_at(&name, "Undefined object.");
         emit_bytes(OP_LOAD, (uint8_t)arg);
         if (match(TOKEN_INT)) {
-            error_at(&parser.previous, "Indexing assignment not yet implemented.");
+            int64_t idx = strtoll(parser.previous.start, NULL, 10);
+            emit_int(idx);
+            emit_byte(OP_SET_INDEX);
+            type_pop(); // pop value
+            type_push(VAL_VOID);
+        } else if (match(TOKEN_STR)) {
+            int idx = add_string(parser.previous.start + 1, parser.previous.length - 2);
+            emit_bytes(OP_PUSH_STR, (uint8_t)idx);
+            emit_byte(OP_SET_INDEX);
+            type_pop(); // pop value
+            type_push(VAL_VOID);
+        } else if (match(TOKEN_LPAREN)) {
+            expression();
+            consume(TOKEN_RPAREN, "Expect ')' after expression.");
+            type_pop(); // pop index type
+            emit_byte(OP_SET_INDEX);
+            type_pop(); // pop value
+            type_push(VAL_VOID);
         } else {
             consume(TOKEN_ID, "Expect member name.");
             Token field_name = parser.previous;
@@ -793,11 +859,23 @@ static void assignment() {
                 }
                 if (field_idx != -1) break;
             }
-            if (field_idx == -1) error_at(&field_name, "Unknown struct field.");
-            emit_bytes(OP_SET_MEMBER, (uint8_t)field_idx);
-            type_pop(); // pop the struct object
-            type_pop(); // pop the value that was assigned
-            type_push(VAL_VOID);
+            
+            if (field_idx != -1) {
+                emit_bytes(OP_SET_MEMBER, (uint8_t)field_idx);
+                type_pop(); // pop value
+                type_push(VAL_VOID);
+            } else {
+                // Try as dynamic index
+                int idx_arg = resolve_local(current_compiler, &field_name);
+                if (idx_arg != -1) {
+                    emit_bytes(OP_LOAD, (uint8_t)idx_arg);
+                    emit_byte(OP_SET_INDEX);
+                    type_pop(); // pop value
+                    type_push(VAL_VOID);
+                } else {
+                    error_at(&field_name, "Unknown struct field or index variable.");
+                }
+            }
         }
     } else {
         int arg = resolve_local(current_compiler, &name);
@@ -840,6 +918,7 @@ ParseRule rules[] = {
     [TOKEN_GTE]       = {NULL,     binary,     PREC_COMPARISON},
     [TOKEN_LPAREN]    = {grouping, NULL,       PREC_NONE},
     [TOKEN_LBRACKET]  = {array_literal, NULL,  PREC_NONE},
+    [TOKEN_LBRACE]    = {map_literal,   NULL,  PREC_NONE},
     [TOKEN_DOT]       = {NULL,     dot,        PREC_CALL},
     [TOKEN_ASSIGN]    = {NULL,     assignment, PREC_ASSIGNMENT},
     [TOKEN_EOF]       = {NULL,     NULL,       PREC_NONE},
@@ -1122,12 +1201,15 @@ Chunk* compiler_compile(const char* source, const char* base_dir) {
     current_compiler->native_count = 0;
     current_compiler->scope_depth = 0;
     add_native("len", 0, VAL_INT, 1, VAL_OBJ);
-    add_native("append", 1, VAL_OBJ, 2, VAL_OBJ, VAL_OBJ);
-    add_native("str", 2, VAL_STR, 1, VAL_OBJ);
+    add_native("append", 1, VAL_OBJ, 2, VAL_OBJ, VAL_ANY);
+    add_native("str", 2, VAL_STR, 1, VAL_ANY);
     add_native("readFile", 3, VAL_STR, 1, VAL_STR);
-    add_native("writeFile", 4, VAL_VOID, 2, VAL_STR, VAL_STR);
+    add_native("writeFile", 4, VAL_BOOL, 2, VAL_STR, VAL_STR);
     add_native("args", 5, VAL_OBJ, 0);
-    add_native("int", 6, VAL_INT, 1, VAL_OBJ);
+    add_native("int", 6, VAL_INT, 1, VAL_ANY);
+    add_native("print", 7, VAL_VOID, 1, VAL_ANY);
+    add_native("println", 8, VAL_VOID, 1, VAL_ANY);
+    add_native("readLine", 9, VAL_STR, 0);
 
     parser.had_error = false;
     parser.panic_mode = false;

@@ -13,6 +13,8 @@ typedef enum {
     TOKEN_AT,       // @
     TOKEN_LBRACKET, // [
     TOKEN_RBRACKET, // ]
+    TOKEN_LBRACE,   // {
+    TOKEN_RBRACE,   // }
     TOKEN_LPAREN,   // (
     TOKEN_RPAREN,   // )
     TOKEN_LANGLE,   // <

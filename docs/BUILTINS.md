@@ -24,6 +24,22 @@ Returns the type of a value as a string.
 - Input: any
 - Output: `str`
 
+## Console I/O
+
+### `print(val)`
+Prints a value to stdout without a newline.
+- Input: any
+- Output: `void`
+
+### `println(val)`
+Prints a value to stdout with a newline.
+- Input: any
+- Output: `void`
+
+### `readLine()`
+Reads a line of text from stdin.
+- Output: `str`
+
 ## File I/O
 
 ### `readFile(path)`

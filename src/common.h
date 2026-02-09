@@ -42,7 +42,9 @@ typedef enum {
     OP_STRUCT,
     OP_INVOKE,
     OP_LOAD_G,
-    OP_POP
+    OP_POP,
+    OP_MAP,
+    OP_SET_INDEX
 } OpCode;
 
 typedef enum {
@@ -58,14 +60,17 @@ typedef enum {
     VAL_FUNC_STR,
     VAL_FUNC_VOID,
     VAL_OBJ,
-    VAL_IMP
+    VAL_IMP,
+    VAL_MAP,
+    VAL_ANY
 } ValueType;
 
 typedef enum {
     OBJ_STRING,
     OBJ_ARRAY,
     OBJ_STRUCT,
-    OBJ_NATIVE
+    OBJ_NATIVE,
+    OBJ_MAP
 } ObjType;
 
 struct HeapObject {
@@ -105,6 +110,19 @@ typedef struct {
     Value* values;
     int field_count;
 } ObjStruct;
+
+typedef struct {
+    Value key;
+    Value value;
+    bool is_used;
+} MapEntry;
+
+typedef struct {
+    HeapObject obj;
+    MapEntry* entries;
+    int count;
+    int capacity;
+} ObjMap;
 
 typedef struct VM VM;
 typedef Value (*NativeFn)(VM* vm, int arg_count, Value* args);

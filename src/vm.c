@@ -43,6 +43,18 @@ static void free_object(HeapObject* obj) {
             free(obj);
             break;
         }
+        case OBJ_MAP: {
+            ObjMap* map = (ObjMap*)obj;
+            for (int i = 0; i < map->capacity; i++) {
+                if (map->entries[i].is_used) {
+                    release(map->entries[i].key);
+                    release(map->entries[i].value);
+                }
+            }
+            free(map->entries);
+            free(map);
+            break;
+        }
     }
 }
 
@@ -80,13 +92,118 @@ ObjArray* allocate_array(VM* vm) {
     return array;
 }
 
+ObjMap* allocate_map(VM* vm) {
+    (void)vm;
+    ObjMap* map = malloc(sizeof(ObjMap));
+    map->obj.type = OBJ_MAP;
+    map->obj.ref_count = 0;
+    map->capacity = 8;
+    map->count = 0;
+    map->entries = calloc(map->capacity, sizeof(MapEntry));
+    return map;
+}
+
+static uint32_t hash_value(Value v) {
+    switch (v.type) {
+        case VAL_INT: return (uint32_t)v.as.i_val;
+        case VAL_FLT: {
+            union { double d; uint32_t u[2]; } conv;
+            conv.d = v.as.f_val;
+            return conv.u[0] ^ conv.u[1];
+        }
+        case VAL_BOOL: return (uint32_t)v.as.b_val;
+        case VAL_OBJ:
+            if (v.as.obj->type == OBJ_STRING) {
+                ObjString* s = (ObjString*)v.as.obj;
+                uint32_t hash = 2166136261u;
+                for (int i = 0; i < s->length; i++) {
+                    hash ^= (uint8_t)s->chars[i];
+                    hash *= 16777619;
+                }
+                return hash;
+            }
+            return (uint32_t)(uintptr_t)v.as.obj;
+        default: return 0;
+    }
+}
+
+static bool values_equal(Value a, Value b) {
+    if (a.type != b.type) return false;
+    switch (a.type) {
+        case VAL_INT: return a.as.i_val == b.as.i_val;
+        case VAL_FLT: return a.as.f_val == b.as.f_val;
+        case VAL_BOOL: return a.as.b_val == b.as.b_val;
+        case VAL_OBJ:
+            if (a.as.obj->type == OBJ_STRING && b.as.obj->type == OBJ_STRING) {
+                return strcmp(((ObjString*)a.as.obj)->chars, ((ObjString*)b.as.obj)->chars) == 0;
+            }
+            return a.as.obj == b.as.obj;
+        default: return false;
+    }
+}
+
+static void map_set(ObjMap* map, Value key, Value value) {
+    if (map->count >= map->capacity * 0.7) {
+        int old_capacity = map->capacity;
+        MapEntry* old_entries = map->entries;
+        map->capacity *= 2;
+        map->entries = calloc(map->capacity, sizeof(MapEntry));
+        map->count = 0;
+        for (int i = 0; i < old_capacity; i++) {
+            if (old_entries[i].is_used) {
+                map_set(map, old_entries[i].key, old_entries[i].value);
+                // No need to release here because we are moving references, but wait...
+                // map_set will retain them. So we should release the old ones.
+                release(old_entries[i].key);
+                release(old_entries[i].value);
+            }
+        }
+        free(old_entries);
+    }
+
+    uint32_t hash = hash_value(key);
+    int index = hash % map->capacity;
+    while (map->entries[index].is_used) {
+        if (values_equal(map->entries[index].key, key)) {
+            release(map->entries[index].value);
+            retain(value);
+            map->entries[index].value = value;
+            return;
+        }
+        index = (index + 1) % map->capacity;
+    }
+
+    retain(key);
+    retain(value);
+    map->entries[index].key = key;
+    map->entries[index].value = value;
+    map->entries[index].is_used = true;
+    map->count++;
+}
+
+static Value map_get(ObjMap* map, Value key) {
+    if (map->capacity == 0) return (Value){VAL_VOID, {0}};
+    uint32_t hash = hash_value(key);
+    int index = hash % map->capacity;
+    int start = index;
+    while (map->entries[index].is_used) {
+        if (values_equal(map->entries[index].key, key)) {
+            return map->entries[index].value;
+        }
+        index = (index + 1) % map->capacity;
+        if (index == start) break;
+    }
+    return (Value){VAL_VOID, {0}};
+}
+
 static Value native_len(VM* vm, int arg_count, Value* args) {
     (void)vm;
     if (arg_count != 1) return (Value){VAL_VOID, {0}};
     Value obj = args[0];
-    if (obj.type == VAL_OBJ) {
+    if (obj.type == VAL_OBJ || obj.type == VAL_MAP) {
         if (obj.as.obj->type == OBJ_STRING) return (Value){VAL_INT, {.i_val = ((ObjString*)obj.as.obj)->length}};
         if (obj.as.obj->type == OBJ_ARRAY) return (Value){VAL_INT, {.i_val = ((ObjArray*)obj.as.obj)->count}};
+        if (obj.as.obj->type == OBJ_MAP) return (Value){VAL_INT, {.i_val = ((ObjMap*)obj.as.obj)->count}};
     }
     return (Value){VAL_INT, {.i_val = 0}};
 }
@@ -115,7 +232,11 @@ static Value native_str(VM* vm, int arg_count, Value* args) {
     if (val.type == VAL_INT) sprintf(buf, "%ld", val.as.i_val);
     else if (val.type == VAL_FLT) sprintf(buf, "%g", val.as.f_val);
     else if (val.type == VAL_BOOL) sprintf(buf, "%s", val.as.b_val ? "tru" : "fls");
-    else if (val.type == VAL_OBJ && val.as.obj->type == OBJ_STRING) return val;
+    else if ((val.type == VAL_OBJ || val.type == VAL_MAP) && val.as.obj->type == OBJ_STRING) {
+        retain(val);
+        return val;
+    }
+    else if ((val.type == VAL_OBJ || val.type == VAL_MAP) && val.as.obj->type == OBJ_MAP) sprintf(buf, "<map of %d>", ((ObjMap*)val.as.obj)->count);
     else sprintf(buf, "<obj>");
     
     ObjString* s = allocate_string(vm, buf, (int)strlen(buf));
@@ -173,10 +294,42 @@ static Value native_int(VM* vm, int arg_count, Value* args) {
     Value val = args[0];
     if (val.type == VAL_INT) return val;
     if (val.type == VAL_FLT) return (Value){VAL_INT, {.i_val = (int64_t)val.as.f_val}};
-    if (val.type == VAL_OBJ && val.as.obj->type == OBJ_STRING) {
+    if ((val.type == VAL_OBJ || val.type == VAL_MAP) && val.as.obj->type == OBJ_STRING) {
         return (Value){VAL_INT, {.i_val = strtoll(((ObjString*)val.as.obj)->chars, NULL, 10)}};
     }
     return (Value){VAL_INT, {.i_val = 0}};
+}
+
+static Value native_print(VM* vm, int arg_count, Value* args) {
+    for (int i = 0; i < arg_count; i++) {
+        Value s = native_str(vm, 1, &args[i]);
+        if ((s.type == VAL_OBJ || s.type == VAL_MAP) && s.as.obj->type == OBJ_STRING) {
+            printf("%s", ((ObjString*)s.as.obj)->chars);
+        }
+        release(s);
+    }
+    return (Value){VAL_VOID, {0}};
+}
+
+static Value native_println(VM* vm, int arg_count, Value* args) {
+    native_print(vm, arg_count, args);
+    printf("\n");
+    return (Value){VAL_VOID, {0}};
+}
+
+static Value native_readLine(VM* vm, int arg_count, Value* args) {
+    (void)arg_count; (void)args;
+    char buf[1024];
+    if (fgets(buf, sizeof(buf), stdin)) {
+        size_t len = strlen(buf);
+        if (len > 0 && buf[len-1] == '\n') {
+            buf[len-1] = '\0';
+            len--;
+        }
+        ObjString* s = allocate_string(vm, buf, (int)len);
+        return (Value){VAL_OBJ, {.obj = (HeapObject*)s}};
+    }
+    return (Value){VAL_OBJ, {.obj = (HeapObject*)allocate_string(vm, "", 0)}};
 }
 
 void vm_define_native(VM* vm, const char* name, NativeFn function, int index) {
@@ -211,6 +364,9 @@ void vm_init(VM* vm, uint8_t* code, char** strings, int strings_count, int argc,
     vm_define_native(vm, "writeFile", native_writeFile, 4);
     vm_define_native(vm, "args", native_args, 5);
     vm_define_native(vm, "int", native_int, 6);
+    vm_define_native(vm, "print", native_print, 7);
+    vm_define_native(vm, "println", native_println, 8);
+    vm_define_native(vm, "readLine", native_readLine, 9);
 }
 
 void vm_push(VM* vm, Value val) {
@@ -291,6 +447,12 @@ void vm_run(VM* vm) {
                     case VAL_IMP:
                         printf("<fun at %ld>\n", val.as.i_val);
                         break;
+                    case VAL_MAP:
+                        printf("<map>\n");
+                        break;
+                    case VAL_ANY:
+                        printf("<any>\n");
+                        break;
                     case VAL_OBJ: {
                         HeapObject* obj = val.as.obj;
                         switch (obj->type) {
@@ -298,6 +460,7 @@ void vm_run(VM* vm) {
                             case OBJ_ARRAY: printf("<array of %d>\n", ((ObjArray*)obj)->count); break;
                             case OBJ_STRUCT: printf("<struct>\n"); break;
                             case OBJ_NATIVE: printf("<native fun %s>\n", ((ObjNative*)obj)->name); break;
+                            case OBJ_MAP: printf("<map of %d>\n", ((ObjMap*)obj)->count); break;
                         }
                         break;
                     }
@@ -561,6 +724,7 @@ void vm_run(VM* vm) {
                         case OBJ_ARRAY: type_idx = 5; break;
                         case OBJ_STRUCT: type_idx = 5; break;
                         case OBJ_NATIVE: type_idx = 5; break;
+                        case OBJ_MAP: type_idx = 5; break;
                     }
                 }
                 if (type_idx > 5) type_idx = 5;
@@ -589,7 +753,11 @@ void vm_run(VM* vm) {
                     char buf[2] = {s->chars[idx], '\0'};
                     ObjString* res = allocate_string(vm, buf, 1);
                     vm_push(vm, (Value){VAL_OBJ, {.obj = (HeapObject*)res}});
-                } else { fprintf(stderr, "Can only index arrays or strings\n"); exit(1); }
+                } else if (obj.type == VAL_OBJ && obj.as.obj->type == OBJ_MAP) {
+                    ObjMap* map = (ObjMap*)obj.as.obj;
+                    Value val = map_get(map, index);
+                    vm_push(vm, val);
+                } else { fprintf(stderr, "Can only index arrays, strings or maps\n"); exit(1); }
                 release(obj); release(index);
                 break;
             }
@@ -614,6 +782,24 @@ void vm_run(VM* vm) {
                 release(obj); release(val);
                 break;
             }
+            case OP_SET_INDEX: {
+                Value index = vm_pop(vm);
+                Value obj = vm_pop(vm);
+                Value val = vm_pop(vm);
+                if (obj.type == VAL_OBJ && obj.as.obj->type == OBJ_ARRAY) {
+                    ObjArray* array = (ObjArray*)obj.as.obj;
+                    int idx = (int)index.as.i_val;
+                    if (idx < 0 || idx >= array->count) { fprintf(stderr, "Array index out of bounds\n"); exit(1); }
+                    release(array->items[idx]);
+                    retain(val);
+                    array->items[idx] = val;
+                } else if (obj.type == VAL_OBJ && obj.as.obj->type == OBJ_MAP) {
+                    ObjMap* map = (ObjMap*)obj.as.obj;
+                    map_set(map, index, val);
+                } else { fprintf(stderr, "Can only set index on arrays or maps\n"); exit(1); }
+                release(obj); release(index); release(val);
+                break;
+            }
             case OP_ARRAY: {
                 int count = vm->code[vm->ip++];
                 ObjArray* array = allocate_array(vm);
@@ -635,6 +821,18 @@ void vm_run(VM* vm) {
                     st->fields[i] = NULL;
                 }
                 vm_push(vm, (Value){VAL_OBJ, {.obj = (HeapObject*)st}});
+                break;
+            }
+            case OP_MAP: {
+                int pair_count = vm->code[vm->ip++];
+                ObjMap* map = allocate_map(vm);
+                for (int i = 0; i < pair_count; i++) {
+                    Value val = vm_pop(vm);
+                    Value key = vm_pop(vm);
+                    map_set(map, key, val);
+                    release(key); release(val);
+                }
+                vm_push(vm, (Value){VAL_OBJ, {.obj = (HeapObject*)map}});
                 break;
             }
             case OP_INVOKE: {

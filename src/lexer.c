@@ -146,6 +146,8 @@ Token lexer_next_token() {
         case '@': return make_token(TOKEN_AT);
         case '[': return make_token(TOKEN_LBRACKET);
         case ']': return make_token(TOKEN_RBRACKET);
+        case '{': return make_token(TOKEN_LBRACE);
+        case '}': return make_token(TOKEN_RBRACE);
         case '(': return make_token(TOKEN_LPAREN);
         case ')': return make_token(TOKEN_RPAREN);
         case '<': return match('=') ? make_token(TOKEN_LTE) : make_token(TOKEN_LANGLE);
