@@ -449,6 +449,46 @@ static void variable() {
     }
 
     error_at(&name, "Undefined identifier.");
+
+    if (match(TOKEN_LPAREN)) {
+        int f_idx = -1;
+        for (int i = 0; i < current_compiler->function_count; i++) {
+            if (name.length == current_compiler->functions[i].name.length &&
+                memcmp(name.start, current_compiler->functions[i].name.start, name.length) == 0) {
+                f_idx = i; break;
+            }
+        }
+        if (f_idx == -1) {
+            error_at(&name, "Undefined function.");
+            return;
+        }
+        Function* f = &current_compiler->functions[f_idx];
+        int arg_count = 0;
+        if (parser.current.type != TOKEN_RPAREN) {
+            do {
+                expression();
+                ValueType t = type_pop();
+                if (arg_count < f->param_count) {
+                    if (t != f->param_types[arg_count]) error_at(&parser.previous, "Type mismatch in function call.");
+                }
+                arg_count++;
+            } while (match(TOKEN_COMMA));
+        }
+        consume(TOKEN_RPAREN, "Expect ')' after arguments.");
+        if (arg_count != f->param_count) error_at(&name, "Wrong number of arguments.");
+        emit_byte(OP_CALL);
+        patch_int32(current_chunk->count, f->addr);
+        current_chunk->count += 4;
+        if (f->return_type != VAL_VOID) type_push(f->return_type);
+    } else {
+        int arg = resolve_local(current_compiler, &name);
+        if (arg != -1) {
+            emit_bytes(OP_LOAD, (uint8_t)arg);
+            type_push(current_compiler->locals[arg].type);
+        } else {
+            error_at(&name, "Undefined identifier.");
+        }
+    }
 }
 
 static void assignment() {
@@ -457,7 +497,11 @@ static void assignment() {
     consume(TOKEN_COLON, "Expect : after variable name");
     ValueType declared_type = parse_type();
     ValueType value_type = type_pop();
+
     if (!is_assignable(declared_type, value_type)) error_at(&var_name, "Assignment type mismatch.");
+
+    if (declared_type != value_type) error_at(&var_name, "Assignment type mismatch.");
+
     int arg = resolve_local(current_compiler, &var_name);
     if (arg == -1) {
         add_local(var_name, declared_type);

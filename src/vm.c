@@ -133,6 +133,44 @@ void vm_run(VM* vm) {
                 }
                 break;
             }
+            case OP_LTE: {
+                Value b = vm_pop(vm);
+                Value a = vm_pop(vm);
+                if (a.type == VAL_INT && b.type == VAL_INT) {
+                    vm_push(vm, (Value){VAL_BOOL, {.b_val = a.as.i_val <= b.as.i_val}});
+                } else if (a.type == VAL_FLT && b.type == VAL_FLT) {
+                    vm_push(vm, (Value){VAL_BOOL, {.b_val = a.as.f_val <= b.as.f_val}});
+                } else {
+                    fprintf(stderr, "Type error in LTE\n");
+                    exit(1);
+                }
+                break;
+            }
+            case OP_GTE: {
+                Value b = vm_pop(vm);
+                Value a = vm_pop(vm);
+                if (a.type == VAL_INT && b.type == VAL_INT) {
+                    vm_push(vm, (Value){VAL_BOOL, {.b_val = a.as.i_val >= b.as.i_val}});
+                } else if (a.type == VAL_FLT && b.type == VAL_FLT) {
+                    vm_push(vm, (Value){VAL_BOOL, {.b_val = a.as.f_val >= b.as.f_val}});
+                } else {
+                    fprintf(stderr, "Type error in GTE\n");
+                    exit(1);
+                }
+                break;
+            }
+            case OP_NEG: {
+                Value a = vm_pop(vm);
+                if (a.type == VAL_INT) {
+                    vm_push(vm, (Value){VAL_INT, {.i_val = -a.as.i_val}});
+                } else if (a.type == VAL_FLT) {
+                    vm_push(vm, (Value){VAL_FLT, {.f_val = -a.as.f_val}});
+                } else {
+                    fprintf(stderr, "Type error in NEG\n");
+                    exit(1);
+                }
+                break;
+            }
             case OP_MOD: {
                 Value b = vm_pop(vm);
                 Value a = vm_pop(vm);

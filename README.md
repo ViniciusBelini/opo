@@ -52,14 +52,5 @@ Example:
 ```
 
 ### Main Entry Point
+
 The program starts execution from the `main` function. All code must be inside functions.
-
-```
-<> -> void: main [
-    factorial(5) !!
-]
-```
-
-## Implementation
-
-Opo is written in C and runs on a custom Bytecode Virtual Machine.
