@@ -1,29 +1,5 @@
-struct [
-    name: str,
-    age: int
-] => Person: type
-
 <> -> void: main [
-    [1, 2, 3] => arr: []int
-    len(arr) !!
-    arr.0 !!
-    append(arr, 4)
-    len(arr) !!
-    arr.3 !!
+    "Hello world!" => msg: str
 
-    Person("Alice", 30) => p: Person
-    p.name !!
-    p.age !!
-    31 => p.age
-    p.age !!
-
-    "Hello " + "World" => s: str
-    s !!
-    len(s) !!
-
-    str(100) !!
-    int("123") !!
-
-    args() => my_args: []str
-    len(my_args) !!
+    msg.20 !!
 ]

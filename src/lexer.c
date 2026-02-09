@@ -4,12 +4,6 @@
 #include <stdbool.h>
 #include "lexer.h"
 
-typedef struct {
-    const char* start;
-    const char* current;
-    int line;
-} Lexer;
-
 Lexer lexer;
 
 void lexer_init(const char* source) {
@@ -123,6 +117,8 @@ static TokenType identifier_type() {
             break;
         case 'f': return check_keyword(1, 2, "ls", TOKEN_BOOL);
         case 's': return check_keyword(1, 5, "truct", TOKEN_STRUCT);
+        case 'p': return check_keyword(1, 2, "ub", TOKEN_PUB);
+        case 'i': return check_keyword(1, 2, "mp", TOKEN_IMP);
     }
     return TOKEN_ID;
 }

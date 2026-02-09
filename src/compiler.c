@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdarg.h>
+#include <libgen.h>
 #include "compiler.h"
 #include "lexer.h"
 #include "vm.h"
@@ -25,17 +27,23 @@ typedef struct {
     ValueType return_type;
     ValueType param_types[16];
     int param_count;
+    bool is_public;
 } Function;
 
 typedef struct {
     Token name;
     Token fields[16];
+    ValueType field_types[16];
     int field_count;
+    bool is_public;
 } StructDef;
 
 typedef struct {
     Token name;
     int index;
+    ValueType return_type;
+    ValueType param_types[8];
+    int param_count;
 } Native;
 
 typedef struct {
@@ -147,6 +155,38 @@ static int resolve_local(CompilerState* state, Token* name) {
     return -1;
 }
 
+static char* root_base_dir = NULL;
+static char* compiled_modules[64];
+static int compiled_modules_count = 0;
+static char* compilation_stack[64];
+static int compilation_stack_count = 0;
+static const char* active_prefix = NULL;
+
+static char* resolve_path(const char* rel_path) {
+    char* resolved = malloc(1024);
+    if (rel_path[0] == '/') {
+        strcpy(resolved, rel_path);
+    } else {
+        sprintf(resolved, "%s/%s", root_base_dir, rel_path);
+    }
+    return resolved;
+}
+
+static char* compiler_read_file(const char* path) {
+    FILE* file = fopen(path, "rb");
+    if (file == NULL) return NULL;
+    fseek(file, 0L, SEEK_END);
+    size_t fileSize = ftell(file);
+    rewind(file);
+    char* buffer = (char*)malloc(fileSize + 1);
+    if (buffer == NULL) return NULL;
+    size_t bytesRead = fread(buffer, 1, fileSize, file);
+    (void)bytesRead;
+    buffer[fileSize] = '\0';
+    fclose(file);
+    return buffer;
+}
+
 static int resolve_native(CompilerState* state, Token* name) {
     for (int i = 0; i < state->native_count; i++) {
         Native* n = &state->natives[i];
@@ -171,11 +211,19 @@ static bool is_assignable(ValueType expected, ValueType actual) {
     return false;
 }
 
-static void add_native(const char* name, int index) {
+static void add_native(const char* name, int index, ValueType ret, int p_count, ...) {
     Native* n = &current_compiler->natives[current_compiler->native_count++];
     n->name.start = name;
     n->name.length = (int)strlen(name);
     n->index = index;
+    n->return_type = ret;
+    n->param_count = p_count;
+    va_list args;
+    va_start(args, p_count);
+    for (int i = 0; i < p_count; i++) {
+        n->param_types[i] = va_arg(args, ValueType);
+    }
+    va_end(args);
 }
 
 static void add_local(Token name, ValueType type) {
@@ -231,13 +279,35 @@ static ValueType parse_type() {
 
     Token t = parser.current;
     advance();
+
+    if (match(TOKEN_DOT)) {
+        Token member = parser.current;
+        advance();
+        char full_name[256];
+        memcpy(full_name, t.start, t.length);
+        full_name[t.length] = '.';
+        memcpy(full_name + t.length + 1, member.start, member.length);
+        full_name[t.length + 1 + member.length] = '\0';
+        
+        for (int i = 0; i < current_compiler->struct_count; i++) {
+            if (current_compiler->structs[i].name.length == (int)strlen(full_name) &&
+                memcmp(current_compiler->structs[i].name.start, full_name, strlen(full_name)) == 0) {
+                return VAL_OBJ;
+            }
+        }
+        error_at(&member, "Unknown type in namespace.");
+        return VAL_VOID;
+    }
+
+    if (t.type == TOKEN_IMP) return VAL_IMP;
+    if (t.type == TOKEN_TYPE) return VAL_VOID;
+
     if (t.length == 3 && memcmp(t.start, "int", 3) == 0) return VAL_INT;
     if (t.length == 3 && memcmp(t.start, "flt", 3) == 0) return VAL_FLT;
     if (t.length == 3 && memcmp(t.start, "bol", 3) == 0) return VAL_BOOL;
     if (t.length == 3 && memcmp(t.start, "str", 3) == 0) return VAL_STR;
     if (t.length == 4 && memcmp(t.start, "void", 4) == 0) return VAL_VOID;
     if (t.length == 3 && memcmp(t.start, "fun", 3) == 0) return VAL_FUNC;
-    if (t.length == 4 && memcmp(t.start, "type", 4) == 0) return VAL_VOID; // simplified
     
     // Check if it's a struct name
     for (int i = 0; i < current_compiler->struct_count; i++) {
@@ -364,10 +434,15 @@ static void grouping() {
 
 static void array_literal() {
     int count = 0;
+    ValueType element_type = VAL_VOID;
     if (parser.current.type != TOKEN_RBRACKET) {
         do {
             expression();
-            type_pop();
+            ValueType t = type_pop();
+            if (count == 0) element_type = t;
+            else if (element_type != t && t != VAL_VOID) {
+                error_at(&parser.previous, "All elements in an array literal must have the same type.");
+            }
             count++;
         } while (match(TOKEN_COMMA));
     }
@@ -445,16 +520,7 @@ static void literal() {
 static void variable() {
     Token name = parser.previous;
 
-    if (name.length == 6 && memcmp(name.start, "typeOf", 6) == 0) {
-        consume(TOKEN_LPAREN, "Expect '(' after 'typeOf'.");
-        expression();
-        consume(TOKEN_RPAREN, "Expect ')' after 'typeOf' argument.");
-        emit_byte(OP_TYPEOF);
-        type_pop();
-        type_push(VAL_STR);
-        return;
-    }
-
+    // 1. Try Local
     int arg = resolve_local(current_compiler, &name);
     if (arg != -1) {
         ValueType type = current_compiler->locals[arg].type;
@@ -470,7 +536,13 @@ static void variable() {
             consume(TOKEN_RPAREN, "Expect ')' after arguments.");
             emit_bytes(OP_LOAD, (uint8_t)arg);
             emit_bytes(OP_INVOKE, (uint8_t)arg_count);
-            type_push(VAL_OBJ);
+            ValueType ret_type = VAL_OBJ;
+            if (type == VAL_FUNC_INT) ret_type = VAL_INT;
+            else if (type == VAL_FUNC_FLT) ret_type = VAL_FLT;
+            else if (type == VAL_FUNC_BOOL) ret_type = VAL_BOOL;
+            else if (type == VAL_FUNC_STR) ret_type = VAL_STR;
+            else if (type == VAL_FUNC_VOID) ret_type = VAL_VOID;
+            if (ret_type != VAL_VOID) type_push(ret_type);
         } else {
             emit_bytes(OP_LOAD, (uint8_t)arg);
             type_push(type);
@@ -478,21 +550,118 @@ static void variable() {
         return;
     }
 
+    // 2. Try Namespace Access
+    if (match(TOKEN_DOT)) {
+        consume(TOKEN_ID, "Expect member name after '.'.");
+        Token member = parser.previous;
+        
+        char full_name[256];
+        memcpy(full_name, name.start, name.length);
+        full_name[name.length] = '.';
+        memcpy(full_name + name.length + 1, member.start, member.length);
+        full_name[name.length + 1 + member.length] = '\0';
+        
+        for (int i = 0; i < current_compiler->function_count; i++) {
+            Function* f = &current_compiler->functions[i];
+            if (f->name.length == (int)strlen(full_name) &&
+                memcmp(f->name.start, full_name, f->name.length) == 0) {
+                if (!f->is_public) error_at(&member, "Cannot access private member.");
+                if (match(TOKEN_LPAREN)) {
+                    int arg_count = 0;
+                    if (parser.current.type != TOKEN_RPAREN) {
+                        do { 
+                            expression(); 
+                            ValueType arg_type = type_pop();
+                            if (arg_count < f->param_count) {
+                                if (!is_assignable(f->param_types[arg_count], arg_type)) {
+                                    error_at(&parser.previous, "Namespaced function argument type mismatch.");
+                                }
+                            }
+                            arg_count++; 
+                        } while (match(TOKEN_COMMA));
+                    }
+                    consume(TOKEN_RPAREN, "Expect ')' after arguments.");
+                    if (arg_count != f->param_count) error_at(&member, "Wrong number of arguments.");
+                    emit_byte(OP_CALL);
+                    patch_int32(current_chunk->count, f->addr);
+                    current_chunk->count += 4;
+                    if (f->return_type != VAL_VOID) type_push(f->return_type);
+                } else {
+                    emit_push_func(f->addr, VAL_FUNC);
+                    type_push(VAL_FUNC);
+                }
+                return;
+            }
+        }
+        
+        for (int i = 0; i < current_compiler->struct_count; i++) {
+            StructDef* sd = &current_compiler->structs[i];
+            if (sd->name.length == (int)strlen(full_name) &&
+                memcmp(sd->name.start, full_name, sd->name.length) == 0) {
+                if (!sd->is_public) error_at(&member, "Cannot access private struct.");
+                if (match(TOKEN_LPAREN)) {
+                    int count = 0;
+                    if (parser.current.type != TOKEN_RPAREN) {
+                        do { 
+                            expression(); 
+                            ValueType arg_type = type_pop();
+                            if (count < sd->field_count) {
+                                if (!is_assignable(sd->field_types[count], arg_type)) {
+                                    error_at(&parser.previous, "Namespaced struct field type mismatch.");
+                                }
+                            }
+                            count++; 
+                        } while (match(TOKEN_COMMA));
+                    }
+                    consume(TOKEN_RPAREN, "Expect ')'.");
+                    if (count != sd->field_count) error_at(&member, "Wrong number of fields for namespaced struct instantiation.");
+                    emit_bytes(OP_STRUCT, (uint8_t)count);
+                    type_push(VAL_OBJ);
+                }
+                return;
+            }
+        }
+        error_at(&member, "Undefined member in namespace.");
+        return;
+    }
+
+
+    if (name.length == 6 && memcmp(name.start, "typeOf", 6) == 0) {
+        consume(TOKEN_LPAREN, "Expect '(' after 'typeOf'.");
+        expression();
+        consume(TOKEN_RPAREN, "Expect ')' after 'typeOf' argument.");
+        emit_byte(OP_TYPEOF);
+        type_pop();
+        type_push(VAL_STR);
+        return;
+    }
+
+
     int n_idx = resolve_native(current_compiler, &name);
     if (n_idx != -1) {
+        Native* n = &current_compiler->natives[0];
+        for (int i = 0; i < current_compiler->native_count; i++) {
+            if (current_compiler->natives[i].index == n_idx) { n = &current_compiler->natives[i]; break; }
+        }
         if (match(TOKEN_LPAREN)) {
             int arg_count = 0;
             if (parser.current.type != TOKEN_RPAREN) {
                 do {
                     expression();
-                    type_pop();
+                    ValueType arg_type = type_pop();
+                    if (arg_count < n->param_count) {
+                        if (!is_assignable(n->param_types[arg_count], arg_type)) {
+                            error_at(&parser.previous, "Native function argument type mismatch.");
+                        }
+                    }
                     arg_count++;
                 } while (match(TOKEN_COMMA));
             }
             consume(TOKEN_RPAREN, "Expect ')' after arguments.");
+            if (arg_count != n->param_count) error_at(&name, "Wrong number of arguments for native function.");
             emit_bytes(OP_LOAD_G, (uint8_t)n_idx);
             emit_bytes(OP_INVOKE, (uint8_t)arg_count);
-            type_push(VAL_OBJ);
+            type_push(n->return_type);
         } else {
             emit_bytes(OP_LOAD_G, (uint8_t)n_idx);
             type_push(VAL_OBJ);
@@ -515,12 +684,17 @@ static void variable() {
             if (parser.current.type != TOKEN_RPAREN) {
                 do {
                     expression();
-                    type_pop();
+                    ValueType arg_type = type_pop();
+                    if (count < sd->field_count) {
+                        if (!is_assignable(sd->field_types[count], arg_type)) {
+                            error_at(&parser.previous, "Struct field type mismatch.");
+                        }
+                    }
                     count++;
                 } while (match(TOKEN_COMMA));
             }
             consume(TOKEN_RPAREN, "Expect ')' after struct arguments.");
-            if (count != sd->field_count) error_at(&name, "Wrong number of fields for struct.");
+            if (count != sd->field_count) error_at(&name, "Wrong number of fields for struct instantiation.");
             emit_bytes(OP_STRUCT, (uint8_t)count);
             type_push(VAL_OBJ);
         } else {
@@ -536,6 +710,19 @@ static void variable() {
             f_idx = i; break;
         }
     }
+    
+    // Try with active prefix if not found
+    if (f_idx == -1 && active_prefix != NULL) {
+        char full_name[256];
+        strcpy(full_name, active_prefix);
+        strncat(full_name, name.start, name.length);
+        for (int i = 0; i < current_compiler->function_count; i++) {
+            if (current_compiler->functions[i].name.length == (int)strlen(full_name) &&
+                memcmp(current_compiler->functions[i].name.start, full_name, strlen(full_name)) == 0) {
+                f_idx = i; break;
+            }
+        }
+    }
 
     if (f_idx != -1) {
         Function* f = &current_compiler->functions[f_idx];
@@ -544,11 +731,17 @@ static void variable() {
             if (parser.current.type != TOKEN_RPAREN) {
                 do {
                     expression();
-                    ValueType t = type_pop();
+                    ValueType arg_type = type_pop();
+                    if (arg_count < f->param_count) {
+                        if (!is_assignable(f->param_types[arg_count], arg_type)) {
+                            error_at(&parser.previous, "Function argument type mismatch.");
+                        }
+                    }
                     arg_count++;
                 } while (match(TOKEN_COMMA));
             }
             consume(TOKEN_RPAREN, "Expect ')' after arguments.");
+            if (arg_count != f->param_count) error_at(&name, "Wrong number of arguments.");
             emit_byte(OP_CALL);
             patch_int32(current_chunk->count, f->addr);
             current_chunk->count += 4;
@@ -570,12 +763,16 @@ static void assignment() {
     if (match(TOKEN_COLON)) {
         ValueType declared_type = parse_type();
         ValueType value_type = type_pop();
+        if (!is_assignable(declared_type, value_type)) {
+            error_at(&name, "Type mismatch in variable initialization.");
+        }
         int arg = resolve_local(current_compiler, &name);
         if (arg == -1) {
             add_local(name, declared_type);
             arg = current_compiler->local_count - 1;
         }
         emit_bytes(OP_STORE, (uint8_t)arg);
+        type_push(VAL_VOID);
     } else if (match(TOKEN_DOT)) {
         int arg = resolve_local(current_compiler, &name);
         if (arg == -1) error_at(&name, "Undefined object.");
@@ -598,19 +795,26 @@ static void assignment() {
             }
             if (field_idx == -1) error_at(&field_name, "Unknown struct field.");
             emit_bytes(OP_SET_MEMBER, (uint8_t)field_idx);
-            type_pop();
+            type_pop(); // pop the struct object
+            type_pop(); // pop the value that was assigned
+            type_push(VAL_VOID);
         }
     } else {
         int arg = resolve_local(current_compiler, &name);
         if (arg == -1) error_at(&name, "Undefined identifier.");
+        ValueType value_type = type_pop();
+        if (!is_assignable(current_compiler->locals[arg].type, value_type)) {
+            error_at(&name, "Type mismatch in assignment.");
+        }
         emit_bytes(OP_STORE, (uint8_t)arg);
-        type_pop();
+        type_push(VAL_VOID);
     }
 }
 
 static void print_op() {
     type_pop();
     emit_byte(OP_PRINT);
+    type_push(VAL_VOID);
 }
 
 ParseRule rules[] = {
@@ -665,95 +869,61 @@ static void statement();
 static void block() {
     consume(TOKEN_LBRACKET, "Expect '[' to start block.");
     current_compiler->scope_depth++;
+    bool empty = true;
     while (parser.current.type != TOKEN_RBRACKET && parser.current.type != TOKEN_EOF) {
+        if (!empty) {
+            ValueType t = type_pop();
+            if (t != VAL_VOID) emit_byte(OP_POP);
+        }
         statement();
+        empty = false;
     }
+    if (empty) type_push(VAL_VOID);
     consume(TOKEN_RBRACKET, "Expect ']' after block.");
     current_compiler->scope_depth--;
 }
 
-static void statement() {
-    if (match(TOKEN_SEMICOLON)) return;
-    int start_addr = current_chunk->count;
-    expression();
-    if (parser.current.type == TOKEN_QUESTION) {
-        advance();
-        int jump_if_f_patch = current_chunk->count;
-        emit_byte(OP_JUMP_IF_F);
-        emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0); 
-        if (parser.current.type == TOKEN_LBRACKET) block(); else statement();
-        int jump_patch = current_chunk->count;
-        emit_byte(OP_JUMP);
-        emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0); 
-        patch_int32(jump_if_f_patch + 1, current_chunk->count);
-        if (parser.current.type == TOKEN_COLON) {
-            advance();
-            if (parser.current.type == TOKEN_LBRACKET) block(); else statement();
-        }
-        patch_int32(jump_patch + 1, current_chunk->count);
-        match(TOKEN_SEMICOLON);
-    } else if (parser.current.type == TOKEN_AT) {
-        advance();
-        int jump_if_f_patch = current_chunk->count;
-        emit_byte(OP_JUMP_IF_F);
-        emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0);
-        if (parser.current.type == TOKEN_LBRACKET) block(); else statement();
-        emit_byte(OP_JUMP);
-        for (int i = 0; i < 4; i++) emit_byte((start_addr >> (i * 8)) & 0xFF);
-        patch_int32(jump_if_f_patch + 1, current_chunk->count);
-        match(TOKEN_SEMICOLON);
-    } else {
-        match(TOKEN_SEMICOLON);
-    }
-}
+static void handle_import(Token* path_token, Token* alias_token);
 
-Chunk* compiler_compile(const char* source) {
-    lexer_init(source);
-    current_chunk = malloc(sizeof(Chunk));
-    current_chunk->code = NULL;
-    current_chunk->count = 0;
-    current_chunk->capacity = 0;
-    current_chunk->strings = NULL;
-    current_chunk->strings_count = 0;
-    current_chunk->strings_capacity = 0;
-    add_string("int", 3); add_string("flt", 3); add_string("bol", 3);
-    add_string("str", 3); add_string("void", 4); add_string("fun", 3);
-
-    current_compiler = malloc(sizeof(CompilerState));
-    current_compiler->local_count = 0;
-    current_compiler->function_count = 0;
-    current_compiler->struct_count = 0;
-    current_compiler->native_count = 0;
-    current_compiler->scope_depth = 0;
-    add_native("len", 0); add_native("append", 1); add_native("str", 2);
-    add_native("readFile", 3); add_native("writeFile", 4); add_native("args", 5);
-    add_native("int", 6);
-
-    parser.had_error = false;
-    parser.panic_mode = false;
-    advance();
-
+static void compile_internal(const char* prefix) {
     while (parser.current.type != TOKEN_EOF) {
         if (match(TOKEN_SEMICOLON)) continue;
+        
+        bool is_public = match(TOKEN_PUB);
+
         if (match(TOKEN_STRUCT)) {
             consume(TOKEN_LBRACKET, "Expect '[' after 'struct'.");
             StructDef* sd = &current_compiler->structs[current_compiler->struct_count++];
             sd->field_count = 0;
+            sd->is_public = is_public;
             while (parser.current.type != TOKEN_RBRACKET) {
                 consume(TOKEN_ID, "Expect field name.");
                 sd->fields[sd->field_count] = parser.previous;
                 consume(TOKEN_COLON, "Expect ':'.");
-                parse_type(); sd->field_count++;
+                sd->field_types[sd->field_count] = parse_type();
+                sd->field_count++;
                 if (parser.current.type == TOKEN_COMMA) advance();
             }
             consume(TOKEN_RBRACKET, "Expect ']' after struct fields.");
             consume(TOKEN_ASSIGN, "Expect '=>' after struct definition.");
             consume(TOKEN_ID, "Expect struct name.");
-            sd->name = parser.previous;
+            
+            Token name = parser.previous;
+            if (prefix != NULL) {
+                char* new_name = malloc(strlen(prefix) + name.length + 1);
+                strcpy(new_name, prefix);
+                strncat(new_name, name.start, name.length);
+                sd->name.start = new_name;
+                sd->name.length = (int)strlen(new_name);
+            } else {
+                sd->name = name;
+            }
+
             consume(TOKEN_COLON, "Expect ':'.");
             consume(TOKEN_TYPE, "Expect 'type' after struct name.");
             continue;
         }
+
         if (parser.current.type == TOKEN_LANGLE) {
             int jump_over = current_chunk->count;
             emit_byte(OP_JUMP);
@@ -773,23 +943,198 @@ Chunk* compiler_compile(const char* source) {
             ValueType return_type = parse_type();
             consume(TOKEN_COLON, "Expect : after ret type");
             consume(TOKEN_ID, "Expect function name");
+            
             Token name = parser.previous;
             Function* func = &current_compiler->functions[current_compiler->function_count++];
-            func->name = name; func->addr = current_chunk->count;
+            
+            if (prefix != NULL) {
+                char* new_name = malloc(strlen(prefix) + name.length + 1);
+                strcpy(new_name, prefix);
+                strncat(new_name, name.start, name.length);
+                func->name.start = new_name;
+                func->name.length = (int)strlen(new_name);
+            } else {
+                func->name = name;
+            }
+
+            func->addr = current_chunk->count;
             func->return_type = return_type; func->param_count = param_count;
+            func->is_public = is_public;
             for (int i = 0; i < param_count; i++) func->param_types[i] = param_types[i];
             int old_local_count = current_compiler->local_count;
             current_compiler->local_count = 0;
             for (int i = 0; i < param_count; i++) add_local(params[i], param_types[i]);
             for (int i = param_count - 1; i >= 0; i--) emit_bytes(OP_STORE, (uint8_t)i);
             block();
+            ValueType actual_ret = type_pop();
+            if (!is_assignable(return_type, actual_ret)) {
+                error_at(&name, "Function return type mismatch.");
+            }
             emit_byte(OP_RET);
             patch_int32(jump_over + 1, current_chunk->count);
             current_compiler->local_count = old_local_count;
-        } else {
+            current_compiler->type_stack_ptr = 0;
+            continue;
+        }
+
+        if (parser.current.type == TOKEN_STR) {
+            Token path_token = parser.current;
             advance();
+            if (match(TOKEN_ASSIGN)) {
+                consume(TOKEN_ID, "Expect alias after =>");
+                Token alias = parser.previous;
+                consume(TOKEN_COLON, "Expect :");
+                if (match(TOKEN_IMP)) {
+                    handle_import(&path_token, &alias);
+                    continue;
+                }
+            }
+            error_at(&path_token, "Unexpected string at top level. Only imports are allowed.");
+            continue;
+        }
+
+        error_at(&parser.current, "Expect function, struct, or import at top level.");
+        advance();
+    }
+}
+
+static void handle_import(Token* path_token, Token* alias_token) {
+    char path[256];
+    memcpy(path, path_token->start + 1, path_token->length - 2);
+    path[path_token->length - 2] = '\0';
+
+    char* full_path = resolve_path(path);
+    
+    for (int i = 0; i < compilation_stack_count; i++) {
+        if (strcmp(compilation_stack[i], full_path) == 0) {
+            error_at(path_token, "Circular import detected.");
+            free(full_path);
+            return;
         }
     }
+
+    
+    if (compiled_modules_count >= 64) {
+        error_at(path_token, "Too many modules.");
+        free(full_path);
+        return;
+    }
+    compiled_modules[compiled_modules_count++] = full_path;
+    compilation_stack[compilation_stack_count++] = full_path;
+
+    char* source = compiler_read_file(full_path);
+    if (source == NULL) {
+        error_at(path_token, "Could not read imported file.");
+        return;
+    }
+
+    char prefix[64];
+    memcpy(prefix, alias_token->start, alias_token->length);
+    prefix[alias_token->length] = '\0';
+    strcat(prefix, ".");
+
+    Lexer old_lexer = lexer;
+    Parser old_parser = parser;
+    const char* old_prefix = active_prefix;
+    
+    lexer_init(source);
+    advance();
+    active_prefix = prefix;
+    
+    compile_internal(prefix);
+    
+    lexer = old_lexer;
+    parser = old_parser;
+    active_prefix = old_prefix;
+    compilation_stack_count--;
+    free(source);
+}
+
+static void statement() {
+    if (match(TOKEN_SEMICOLON)) {
+        type_push(VAL_VOID);
+        return;
+    }
+    int start_addr = current_chunk->count;
+    expression();
+    if (parser.current.type == TOKEN_QUESTION) {
+        if (type_pop() != VAL_BOOL) error_at(&parser.previous, "Condition must be boolean.");
+        advance();
+        int jump_if_f_patch = current_chunk->count;
+        emit_byte(OP_JUMP_IF_F);
+        emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0); 
+        if (parser.current.type == TOKEN_LBRACKET) block(); else statement();
+        ValueType t1 = type_pop();
+        int jump_patch = current_chunk->count;
+        emit_byte(OP_JUMP);
+        emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0); 
+        patch_int32(jump_if_f_patch + 1, current_chunk->count);
+        if (parser.current.type == TOKEN_COLON) {
+            advance();
+            if (parser.current.type == TOKEN_LBRACKET) block(); else statement();
+            ValueType t2 = type_pop();
+            if (t1 == t2) type_push(t1);
+            else type_push(VAL_VOID);
+        } else {
+            type_push(VAL_VOID);
+        }
+        patch_int32(jump_patch + 1, current_chunk->count);
+        match(TOKEN_SEMICOLON);
+    } else if (parser.current.type == TOKEN_AT) {
+        if (type_pop() != VAL_BOOL) error_at(&parser.previous, "Condition must be boolean.");
+        advance();
+        int jump_if_f_patch = current_chunk->count;
+        emit_byte(OP_JUMP_IF_F);
+        emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0);
+        if (parser.current.type == TOKEN_LBRACKET) block(); else statement();
+        type_pop();
+        emit_byte(OP_JUMP);
+        for (int i = 0; i < 4; i++) emit_byte((start_addr >> (i * 8)) & 0xFF);
+        patch_int32(jump_if_f_patch + 1, current_chunk->count);
+        match(TOKEN_SEMICOLON);
+        type_push(VAL_VOID);
+    } else {
+        match(TOKEN_SEMICOLON);
+    }
+}
+
+Chunk* compiler_compile(const char* source, const char* base_dir) {
+    (void)base_dir; // Will use later
+    lexer_init(source);
+    current_chunk = malloc(sizeof(Chunk));
+    current_chunk->code = NULL;
+    current_chunk->count = 0;
+    current_chunk->capacity = 0;
+    current_chunk->strings = NULL;
+    current_chunk->strings_count = 0;
+    current_chunk->strings_capacity = 0;
+    add_string("int", 3); add_string("flt", 3); add_string("bol", 3);
+    add_string("str", 3); add_string("void", 4); add_string("fun", 3);
+
+    compiled_modules_count = 0;
+    compilation_stack_count = 0;
+    active_prefix = NULL;
+
+    current_compiler = malloc(sizeof(CompilerState));
+    current_compiler->local_count = 0;
+    current_compiler->function_count = 0;
+    current_compiler->struct_count = 0;
+    current_compiler->native_count = 0;
+    current_compiler->scope_depth = 0;
+    add_native("len", 0, VAL_INT, 1, VAL_OBJ);
+    add_native("append", 1, VAL_OBJ, 2, VAL_OBJ, VAL_OBJ);
+    add_native("str", 2, VAL_STR, 1, VAL_OBJ);
+    add_native("readFile", 3, VAL_STR, 1, VAL_STR);
+    add_native("writeFile", 4, VAL_VOID, 2, VAL_STR, VAL_STR);
+    add_native("args", 5, VAL_OBJ, 0);
+    add_native("int", 6, VAL_INT, 1, VAL_OBJ);
+
+    parser.had_error = false;
+    parser.panic_mode = false;
+    root_base_dir = (char*)base_dir;
+    advance();
+
+    compile_internal(NULL);
 
     int main_idx = -1;
     for (int i = 0; i < current_compiler->function_count; i++) {
@@ -798,6 +1143,7 @@ Chunk* compiler_compile(const char* source) {
             main_idx = i; break;
         }
     }
+
     if (main_idx != -1) {
         emit_byte(OP_CALL);
         patch_int32(current_chunk->count, current_compiler->functions[main_idx].addr);

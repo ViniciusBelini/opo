@@ -288,6 +288,7 @@ void vm_run(VM* vm) {
                     case VAL_FUNC_BOOL:
                     case VAL_FUNC_STR:
                     case VAL_FUNC_VOID:
+                    case VAL_IMP:
                         printf("<fun at %ld>\n", val.as.i_val);
                         break;
                     case VAL_OBJ: {
@@ -511,6 +512,10 @@ void vm_run(VM* vm) {
             case OP_LOAD_G: {
                 int index = vm->code[vm->ip++];
                 vm_push(vm, vm->locals[index]);
+                break;
+            }
+            case OP_POP: {
+                release(vm_pop(vm));
                 break;
             }
             case OP_JUMP_IF_F: {

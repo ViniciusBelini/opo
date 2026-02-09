@@ -1,0 +1,11 @@
+"./math_utils.opo" => mu: imp
+
+<> -> void: main [
+    mu.addOne(10) !!
+    mu.usePrivate(5) !!
+
+    mu.Point(1, 2) => p: mu.Point
+    p.x !!
+
+    # mu.Secret(0) !! # Should fail
+]

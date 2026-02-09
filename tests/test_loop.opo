@@ -1,5 +1,7 @@
-0 => i: int
-i 10000000 < @ [
-    i !!
-    i 1 + => i: int
+<> -> void: main [
+    0 => i: int
+    i < 10 @ [
+        i !!
+        i + 1 => i: int
+    ]
 ]

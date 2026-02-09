@@ -41,7 +41,8 @@ typedef enum {
     OP_ARRAY,
     OP_STRUCT,
     OP_INVOKE,
-    OP_LOAD_G
+    OP_LOAD_G,
+    OP_POP
 } OpCode;
 
 typedef enum {
@@ -56,7 +57,8 @@ typedef enum {
     VAL_FUNC_BOOL,
     VAL_FUNC_STR,
     VAL_FUNC_VOID,
-    VAL_OBJ
+    VAL_OBJ,
+    VAL_IMP
 } ValueType;
 
 typedef enum {

@@ -27,6 +27,7 @@ typedef enum {
     TOKEN_LTE, TOKEN_GTE,
     TOKEN_DOT,
     TOKEN_STRUCT, TOKEN_TYPE,
+    TOKEN_PUB, TOKEN_IMP,
     TOKEN_EOF,
     TOKEN_ERROR
 } TokenType;
@@ -37,6 +38,14 @@ typedef struct {
     int length;
     int line;
 } Token;
+
+typedef struct {
+    const char* start;
+    const char* current;
+    int line;
+} Lexer;
+
+extern Lexer lexer;
 
 void lexer_init(const char* source);
 Token lexer_next_token();

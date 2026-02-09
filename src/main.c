@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "compiler.h"
 #include "vm.h"
 
@@ -37,7 +38,16 @@ int main(int argc, char* argv[]) {
     }
 
     char* source = read_file(argv[1]);
-    Chunk* chunk = compiler_compile(source);
+    
+    char* last_slash = strrchr(argv[1], '/');
+    char base_dir[1024] = ".";
+    if (last_slash != NULL) {
+        size_t len = last_slash - argv[1];
+        strncpy(base_dir, argv[1], len);
+        base_dir[len] = '\0';
+    }
+
+    Chunk* chunk = compiler_compile(source, base_dir);
     free(source);
 
     if (chunk == NULL) return 65;

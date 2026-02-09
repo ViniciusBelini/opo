@@ -1,0 +1,20 @@
+pub <n: int> -> int: addOne [
+    n + 1
+]
+
+<n: int> -> int: privateFunc [
+    n * 2
+]
+
+pub <n: int> -> int: usePrivate [
+    privateFunc(n)
+]
+
+pub struct [
+    x: int,
+    y: int
+] => Point: type
+
+struct [
+    id: int
+] => Secret: type

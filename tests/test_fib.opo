@@ -1,9 +1,11 @@
 <n: int> -> int: fib [
-    n 2 < ? [
+    n < 2 ? [
         n
     ] : [
-        n 1 - fib n 2 - fib +
+        fib(n - 1) + fib(n - 2)
     ]
 ]
 
-10 fib !!
+<> -> void: main [
+    fib(10) !!
+]
