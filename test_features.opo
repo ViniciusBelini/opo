@@ -23,7 +23,7 @@ struct [
 
     str(100) !!
     int("123") !!
-
+    
     args() => my_args: []str
     len(my_args) !!
 ]

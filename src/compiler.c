@@ -28,10 +28,25 @@ typedef struct {
 } Function;
 
 typedef struct {
+    Token name;
+    Token fields[16];
+    int field_count;
+} StructDef;
+
+typedef struct {
+    Token name;
+    int index;
+} Native;
+
+typedef struct {
     Local locals[256];
     int local_count;
     Function functions[256];
     int function_count;
+    StructDef structs[64];
+    int struct_count;
+    Native natives[64];
+    int native_count;
     int scope_depth;
     ValueType type_stack[STACK_MAX];
     int type_stack_ptr;
@@ -132,6 +147,17 @@ static int resolve_local(CompilerState* state, Token* name) {
     return -1;
 }
 
+static int resolve_native(CompilerState* state, Token* name) {
+    for (int i = 0; i < state->native_count; i++) {
+        Native* n = &state->natives[i];
+        if (name->length == n->name.length &&
+            memcmp(name->start, n->name.start, name->length) == 0) {
+            return n->index;
+        }
+    }
+    return -1;
+}
+
 static bool match(TokenType type) {
     if (parser.current.type != type) return false;
     advance();
@@ -143,6 +169,13 @@ static bool is_assignable(ValueType expected, ValueType actual) {
     if (expected == VAL_FUNC && actual >= VAL_FUNC) return true;
     if (actual == VAL_FUNC && expected >= VAL_FUNC) return true;
     return false;
+}
+
+static void add_native(const char* name, int index) {
+    Native* n = &current_compiler->natives[current_compiler->native_count++];
+    n->name.start = name;
+    n->name.length = (int)strlen(name);
+    n->index = index;
 }
 
 static void add_local(Token name, ValueType type) {
@@ -173,11 +206,12 @@ static ValueType type_pop() {
 }
 
 static ValueType parse_type() {
+    if (match(TOKEN_LBRACKET)) {
+        consume(TOKEN_RBRACKET, "Expect ']' after '[' for array type.");
+        parse_type();
+        return VAL_OBJ;
+    }
     if (match(TOKEN_LANGLE)) {
-        // Function type: <type, type, ...> -> return_type
-        // For now we don't store the full signature in ValueType, 
-        // just return VAL_FUNC. Full type checking of signatures 
-        // will be added in the future as Opo evolves.
         while (parser.current.type != TOKEN_RANGLE && parser.current.type != TOKEN_EOF) {
             parse_type();
             if (parser.current.type == TOKEN_COMMA) advance();
@@ -203,6 +237,16 @@ static ValueType parse_type() {
     if (t.length == 3 && memcmp(t.start, "str", 3) == 0) return VAL_STR;
     if (t.length == 4 && memcmp(t.start, "void", 4) == 0) return VAL_VOID;
     if (t.length == 3 && memcmp(t.start, "fun", 3) == 0) return VAL_FUNC;
+    if (t.length == 4 && memcmp(t.start, "type", 4) == 0) return VAL_VOID; // simplified
+    
+    // Check if it's a struct name
+    for (int i = 0; i < current_compiler->struct_count; i++) {
+        if (t.length == current_compiler->structs[i].name.length &&
+            memcmp(t.start, current_compiler->structs[i].name.start, t.length) == 0) {
+            return VAL_OBJ;
+        }
+    }
+
     error_at(&t, "Unknown type.");
     return VAL_VOID;
 }
@@ -250,14 +294,19 @@ static void binary() {
         case TOKEN_MINUS:
         case TOKEN_STAR:
         case TOKEN_SLASH:
-            if (a != b || (a != VAL_INT && a != VAL_FLT)) {
-                error_at(&parser.previous, "Arithmetic type error.");
+            if (operator_type == TOKEN_PLUS && a == VAL_STR && b == VAL_STR) {
+                emit_byte(OP_ADD);
+                type_push(VAL_STR);
+            } else {
+                if (a != b || (a != VAL_INT && a != VAL_FLT)) {
+                    error_at(&parser.previous, "Arithmetic type error.");
+                }
+                if (operator_type == TOKEN_PLUS) emit_byte(OP_ADD);
+                else if (operator_type == TOKEN_MINUS) emit_byte(OP_SUB);
+                else if (operator_type == TOKEN_STAR) emit_byte(OP_MUL);
+                else if (operator_type == TOKEN_SLASH) emit_byte(OP_DIV);
+                type_push(a);
             }
-            if (operator_type == TOKEN_PLUS) emit_byte(OP_ADD);
-            else if (operator_type == TOKEN_MINUS) emit_byte(OP_SUB);
-            else if (operator_type == TOKEN_STAR) emit_byte(OP_MUL);
-            else if (operator_type == TOKEN_SLASH) emit_byte(OP_DIV);
-            type_push(a);
             break;
         case TOKEN_PERCENT:
             if (a != VAL_INT || b != VAL_INT) {
@@ -313,6 +362,51 @@ static void grouping() {
     consume(TOKEN_RPAREN, "Expect ')' after expression.");
 }
 
+static void array_literal() {
+    int count = 0;
+    if (parser.current.type != TOKEN_RBRACKET) {
+        do {
+            expression();
+            type_pop();
+            count++;
+        } while (match(TOKEN_COMMA));
+    }
+    consume(TOKEN_RBRACKET, "Expect ']' after array elements.");
+    emit_bytes(OP_ARRAY, (uint8_t)count);
+    type_push(VAL_OBJ);
+}
+
+static void dot() {
+    if (match(TOKEN_INT)) {
+        int64_t idx = strtoll(parser.previous.start, NULL, 10);
+        emit_byte(OP_PUSH_INT);
+        for (int i = 0; i < 8; i++) {
+            emit_byte((idx >> (i * 8)) & 0xFF);
+        }
+        emit_byte(OP_INDEX);
+        type_pop();
+        type_push(VAL_OBJ);
+    } else {
+        consume(TOKEN_ID, "Expect member name after '.'.");
+        Token name = parser.previous;
+        int field_idx = -1;
+        for (int i = 0; i < current_compiler->struct_count; i++) {
+            for (int j = 0; j < current_compiler->structs[i].field_count; j++) {
+                if (name.length == current_compiler->structs[i].fields[j].length &&
+                    memcmp(name.start, current_compiler->structs[i].fields[j].start, name.length) == 0) {
+                    field_idx = j;
+                    break;
+                }
+            }
+            if (field_idx != -1) break;
+        }
+        if (field_idx == -1) error_at(&name, "Unknown struct field.");
+        emit_bytes(OP_GET_MEMBER, (uint8_t)field_idx);
+        type_pop();
+        type_push(VAL_OBJ);
+    }
+}
+
 static void number() {
     if (parser.previous.type == TOKEN_INT) {
         int64_t val = strtoll(parser.previous.start, NULL, 10);
@@ -351,7 +445,6 @@ static void literal() {
 static void variable() {
     Token name = parser.previous;
 
-    // Built-in: typeOf
     if (name.length == 6 && memcmp(name.start, "typeOf", 6) == 0) {
         consume(TOKEN_LPAREN, "Expect '(' after 'typeOf'.");
         expression();
@@ -362,38 +455,22 @@ static void variable() {
         return;
     }
 
-    // Check if it's a local variable or parameter
     int arg = resolve_local(current_compiler, &name);
     if (arg != -1) {
         ValueType type = current_compiler->locals[arg].type;
-        
-        // If it's a function call via pointer
         if (match(TOKEN_LPAREN)) {
-            if (type < VAL_FUNC && type != VAL_INT) {
-                error_at(&name, "Can only call functions.");
-            }
             int arg_count = 0;
             if (parser.current.type != TOKEN_RPAREN) {
                 do {
                     expression();
-                    type_pop(); // Signature checking not yet implemented
+                    type_pop();
                     arg_count++;
                 } while (match(TOKEN_COMMA));
             }
             consume(TOKEN_RPAREN, "Expect ')' after arguments.");
-            
-            // Load the function address AFTER arguments are pushed
             emit_bytes(OP_LOAD, (uint8_t)arg);
-            emit_byte(OP_CALL_PTR);
-            
-            // Push the correct return type based on the function type
-            switch (type) {
-                case VAL_FUNC_INT:  type_push(VAL_INT); break;
-                case VAL_FUNC_FLT:  type_push(VAL_FLT); break;
-                case VAL_FUNC_BOOL: type_push(VAL_BOOL); break;
-                case VAL_FUNC_STR:  type_push(VAL_STR); break;
-                default:            type_push(VAL_VOID); break;
-            }
+            emit_bytes(OP_INVOKE, (uint8_t)arg_count);
+            type_push(VAL_OBJ);
         } else {
             emit_bytes(OP_LOAD, (uint8_t)arg);
             type_push(type);
@@ -401,7 +478,57 @@ static void variable() {
         return;
     }
 
-    // Check if it's a function name
+    int n_idx = resolve_native(current_compiler, &name);
+    if (n_idx != -1) {
+        if (match(TOKEN_LPAREN)) {
+            int arg_count = 0;
+            if (parser.current.type != TOKEN_RPAREN) {
+                do {
+                    expression();
+                    type_pop();
+                    arg_count++;
+                } while (match(TOKEN_COMMA));
+            }
+            consume(TOKEN_RPAREN, "Expect ')' after arguments.");
+            emit_bytes(OP_LOAD_G, (uint8_t)n_idx);
+            emit_bytes(OP_INVOKE, (uint8_t)arg_count);
+            type_push(VAL_OBJ);
+        } else {
+            emit_bytes(OP_LOAD_G, (uint8_t)n_idx);
+            type_push(VAL_OBJ);
+        }
+        return;
+    }
+
+    int s_idx = -1;
+    for (int i = 0; i < current_compiler->struct_count; i++) {
+        if (name.length == current_compiler->structs[i].name.length &&
+            memcmp(name.start, current_compiler->structs[i].name.start, name.length) == 0) {
+            s_idx = i; break;
+        }
+    }
+
+    if (s_idx != -1) {
+        StructDef* sd = &current_compiler->structs[s_idx];
+        if (match(TOKEN_LPAREN)) {
+            int count = 0;
+            if (parser.current.type != TOKEN_RPAREN) {
+                do {
+                    expression();
+                    type_pop();
+                    count++;
+                } while (match(TOKEN_COMMA));
+            }
+            consume(TOKEN_RPAREN, "Expect ')' after struct arguments.");
+            if (count != sd->field_count) error_at(&name, "Wrong number of fields for struct.");
+            emit_bytes(OP_STRUCT, (uint8_t)count);
+            type_push(VAL_OBJ);
+        } else {
+            error_at(&name, "Expect '(' after struct name for instantiation.");
+        }
+        return;
+    }
+
     int f_idx = -1;
     for (int i = 0; i < current_compiler->function_count; i++) {
         if (name.length == current_compiler->functions[i].name.length &&
@@ -413,35 +540,21 @@ static void variable() {
     if (f_idx != -1) {
         Function* f = &current_compiler->functions[f_idx];
         if (match(TOKEN_LPAREN)) {
-            // Direct call
             int arg_count = 0;
             if (parser.current.type != TOKEN_RPAREN) {
                 do {
                     expression();
                     ValueType t = type_pop();
-                    if (arg_count < f->param_count) {
-                        if (!is_assignable(f->param_types[arg_count], t)) error_at(&parser.previous, "Type mismatch in function call.");
-                    }
                     arg_count++;
                 } while (match(TOKEN_COMMA));
             }
             consume(TOKEN_RPAREN, "Expect ')' after arguments.");
-            if (arg_count != f->param_count) error_at(&name, "Wrong number of arguments.");
             emit_byte(OP_CALL);
             patch_int32(current_chunk->count, f->addr);
             current_chunk->count += 4;
             if (f->return_type != VAL_VOID) type_push(f->return_type);
         } else {
-            // Pushing function address as a value
             ValueType f_type = VAL_FUNC;
-            switch (f->return_type) {
-                case VAL_INT:  f_type = VAL_FUNC_INT; break;
-                case VAL_FLT:  f_type = VAL_FUNC_FLT; break;
-                case VAL_BOOL: f_type = VAL_FUNC_BOOL; break;
-                case VAL_STR:  f_type = VAL_FUNC_STR; break;
-                case VAL_VOID: f_type = VAL_FUNC_VOID; break;
-                default: break;
-            }
             emit_push_func(f->addr, f_type);
             type_push(f_type);
         }
@@ -453,17 +566,46 @@ static void variable() {
 
 static void assignment() {
     consume(TOKEN_ID, "Expect variable name after =>");
-    Token var_name = parser.previous;
-    consume(TOKEN_COLON, "Expect : after variable name");
-    ValueType declared_type = parse_type();
-    ValueType value_type = type_pop();
-    if (!is_assignable(declared_type, value_type)) error_at(&var_name, "Assignment type mismatch.");
-    int arg = resolve_local(current_compiler, &var_name);
-    if (arg == -1) {
-        add_local(var_name, declared_type);
-        arg = current_compiler->local_count - 1;
+    Token name = parser.previous;
+    if (match(TOKEN_COLON)) {
+        ValueType declared_type = parse_type();
+        ValueType value_type = type_pop();
+        int arg = resolve_local(current_compiler, &name);
+        if (arg == -1) {
+            add_local(name, declared_type);
+            arg = current_compiler->local_count - 1;
+        }
+        emit_bytes(OP_STORE, (uint8_t)arg);
+    } else if (match(TOKEN_DOT)) {
+        int arg = resolve_local(current_compiler, &name);
+        if (arg == -1) error_at(&name, "Undefined object.");
+        emit_bytes(OP_LOAD, (uint8_t)arg);
+        if (match(TOKEN_INT)) {
+            error_at(&parser.previous, "Indexing assignment not yet implemented.");
+        } else {
+            consume(TOKEN_ID, "Expect member name.");
+            Token field_name = parser.previous;
+            int field_idx = -1;
+            for (int i = 0; i < current_compiler->struct_count; i++) {
+                for (int j = 0; j < current_compiler->structs[i].field_count; j++) {
+                    if (field_name.length == current_compiler->structs[i].fields[j].length &&
+                        memcmp(field_name.start, current_compiler->structs[i].fields[j].start, field_name.length) == 0) {
+                        field_idx = j;
+                        break;
+                    }
+                }
+                if (field_idx != -1) break;
+            }
+            if (field_idx == -1) error_at(&field_name, "Unknown struct field.");
+            emit_bytes(OP_SET_MEMBER, (uint8_t)field_idx);
+            type_pop();
+        }
+    } else {
+        int arg = resolve_local(current_compiler, &name);
+        if (arg == -1) error_at(&name, "Undefined identifier.");
+        emit_bytes(OP_STORE, (uint8_t)arg);
+        type_pop();
     }
-    emit_bytes(OP_STORE, (uint8_t)arg);
 }
 
 static void print_op() {
@@ -493,6 +635,8 @@ ParseRule rules[] = {
     [TOKEN_LTE]       = {NULL,     binary,     PREC_COMPARISON},
     [TOKEN_GTE]       = {NULL,     binary,     PREC_COMPARISON},
     [TOKEN_LPAREN]    = {grouping, NULL,       PREC_NONE},
+    [TOKEN_LBRACKET]  = {array_literal, NULL,  PREC_NONE},
+    [TOKEN_DOT]       = {NULL,     dot,        PREC_CALL},
     [TOKEN_ASSIGN]    = {NULL,     assignment, PREC_ASSIGNMENT},
     [TOKEN_EOF]       = {NULL,     NULL,       PREC_NONE},
 };
@@ -516,66 +660,50 @@ static void parse_precedence(Precedence precedence) {
     }
 }
 
+static void statement();
+
+static void block() {
+    consume(TOKEN_LBRACKET, "Expect '[' to start block.");
+    current_compiler->scope_depth++;
+    while (parser.current.type != TOKEN_RBRACKET && parser.current.type != TOKEN_EOF) {
+        statement();
+    }
+    consume(TOKEN_RBRACKET, "Expect ']' after block.");
+    current_compiler->scope_depth--;
+}
+
 static void statement() {
     if (match(TOKEN_SEMICOLON)) return;
-    if (parser.current.type == TOKEN_LBRACKET) {
+    int start_addr = current_chunk->count;
+    expression();
+    if (parser.current.type == TOKEN_QUESTION) {
         advance();
-        current_compiler->scope_depth++;
-        while (parser.current.type != TOKEN_RBRACKET && parser.current.type != TOKEN_EOF) {
-            statement();
+        int jump_if_f_patch = current_chunk->count;
+        emit_byte(OP_JUMP_IF_F);
+        emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0); 
+        if (parser.current.type == TOKEN_LBRACKET) block(); else statement();
+        int jump_patch = current_chunk->count;
+        emit_byte(OP_JUMP);
+        emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0); 
+        patch_int32(jump_if_f_patch + 1, current_chunk->count);
+        if (parser.current.type == TOKEN_COLON) {
+            advance();
+            if (parser.current.type == TOKEN_LBRACKET) block(); else statement();
         }
-        consume(TOKEN_RBRACKET, "Expect ']' after block.");
-        current_compiler->scope_depth--;
+        patch_int32(jump_patch + 1, current_chunk->count);
+        match(TOKEN_SEMICOLON);
+    } else if (parser.current.type == TOKEN_AT) {
+        advance();
+        int jump_if_f_patch = current_chunk->count;
+        emit_byte(OP_JUMP_IF_F);
+        emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0);
+        if (parser.current.type == TOKEN_LBRACKET) block(); else statement();
+        emit_byte(OP_JUMP);
+        for (int i = 0; i < 4; i++) emit_byte((start_addr >> (i * 8)) & 0xFF);
+        patch_int32(jump_if_f_patch + 1, current_chunk->count);
         match(TOKEN_SEMICOLON);
     } else {
-        int start_addr = current_chunk->count;
-        expression();
-
-        if (parser.current.type == TOKEN_QUESTION) {
-            advance();
-
-            int jump_if_f_patch = current_chunk->count;
-            emit_byte(OP_JUMP_IF_F);
-            emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0); // placeholder
-
-            statement(); // true block
-
-            int jump_patch = current_chunk->count;
-            emit_byte(OP_JUMP);
-            emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0); // placeholder
-
-            int false_addr = current_chunk->count;
-        patch_int32(jump_if_f_patch + 1, false_addr);
-
-            if (parser.current.type == TOKEN_COLON) {
-                advance();
-                statement(); // false block
-            }
-
-            int end_addr = current_chunk->count;
-            patch_int32(jump_patch + 1, end_addr);
-            match(TOKEN_SEMICOLON);
-        } else if (parser.current.type == TOKEN_AT) {
-            advance();
-
-            int jump_if_f_patch = current_chunk->count;
-            emit_byte(OP_JUMP_IF_F);
-            emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0); // placeholder
-
-            statement(); // block
-
-            emit_byte(OP_JUMP);
-            int jump_back_addr = start_addr;
-            for (int i = 0; i < 4; i++) {
-                emit_byte((jump_back_addr >> (i * 8)) & 0xFF);
-            }
-
-            int end_addr = current_chunk->count;
-            patch_int32(jump_if_f_patch + 1, end_addr);
-            match(TOKEN_SEMICOLON);
-        } else {
-            match(TOKEN_SEMICOLON);
-        }
+        match(TOKEN_SEMICOLON);
     }
 }
 
@@ -588,40 +716,50 @@ Chunk* compiler_compile(const char* source) {
     current_chunk->strings = NULL;
     current_chunk->strings_count = 0;
     current_chunk->strings_capacity = 0;
-
-    // Pre-fill type strings for OP_TYPEOF (indices 0-5)
-    add_string("int", 3);
-    add_string("flt", 3);
-    add_string("bol", 3);
-    add_string("str", 3);
-    add_string("void", 4);
-    add_string("fun", 3);
+    add_string("int", 3); add_string("flt", 3); add_string("bol", 3);
+    add_string("str", 3); add_string("void", 4); add_string("fun", 3);
 
     current_compiler = malloc(sizeof(CompilerState));
     current_compiler->local_count = 0;
     current_compiler->function_count = 0;
+    current_compiler->struct_count = 0;
+    current_compiler->native_count = 0;
     current_compiler->scope_depth = 0;
+    add_native("len", 0); add_native("append", 1); add_native("str", 2);
+    add_native("readFile", 3); add_native("writeFile", 4); add_native("args", 5);
+    add_native("int", 6);
 
     parser.had_error = false;
     parser.panic_mode = false;
-
     advance();
-
-    // For now, let's just parse a list of expressions/statements
-    // Specifically look for main function if we want to be correct,
-    // but for the first test let's just parse everything.
 
     while (parser.current.type != TOKEN_EOF) {
         if (match(TOKEN_SEMICOLON)) continue;
+        if (match(TOKEN_STRUCT)) {
+            consume(TOKEN_LBRACKET, "Expect '[' after 'struct'.");
+            StructDef* sd = &current_compiler->structs[current_compiler->struct_count++];
+            sd->field_count = 0;
+            while (parser.current.type != TOKEN_RBRACKET) {
+                consume(TOKEN_ID, "Expect field name.");
+                sd->fields[sd->field_count] = parser.previous;
+                consume(TOKEN_COLON, "Expect ':'.");
+                parse_type(); sd->field_count++;
+                if (parser.current.type == TOKEN_COMMA) advance();
+            }
+            consume(TOKEN_RBRACKET, "Expect ']' after struct fields.");
+            consume(TOKEN_ASSIGN, "Expect '=>' after struct definition.");
+            consume(TOKEN_ID, "Expect struct name.");
+            sd->name = parser.previous;
+            consume(TOKEN_COLON, "Expect ':'.");
+            consume(TOKEN_TYPE, "Expect 'type' after struct name.");
+            continue;
+        }
         if (parser.current.type == TOKEN_LANGLE) {
             int jump_over = current_chunk->count;
             emit_byte(OP_JUMP);
             emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0);
-
             advance();
-            Token params[16];
-            ValueType param_types[16];
-            int param_count = 0;
+            Token params[16]; ValueType param_types[16]; int param_count = 0;
             while (parser.current.type != TOKEN_RANGLE) {
                 consume(TOKEN_ID, "Expect param name");
                 params[param_count] = parser.previous;
@@ -636,76 +774,37 @@ Chunk* compiler_compile(const char* source) {
             consume(TOKEN_COLON, "Expect : after ret type");
             consume(TOKEN_ID, "Expect function name");
             Token name = parser.previous;
-
             Function* func = &current_compiler->functions[current_compiler->function_count++];
-            func->name = name;
-            func->addr = current_chunk->count;
-            func->return_type = return_type;
-            func->param_count = param_count;
+            func->name = name; func->addr = current_chunk->count;
+            func->return_type = return_type; func->param_count = param_count;
             for (int i = 0; i < param_count; i++) func->param_types[i] = param_types[i];
-
             int old_local_count = current_compiler->local_count;
-            int old_type_stack_ptr = current_compiler->type_stack_ptr;
-            current_compiler->local_count = 0; // Reset locals for new function
-            current_compiler->type_stack_ptr = 0; // Reset type stack for new function
-
-            for (int i = 0; i < param_count; i++) {
-                add_local(params[i], param_types[i]);
-            }
-            // Emit stores for params in reverse order
-            for (int i = param_count - 1; i >= 0; i--) {
-                emit_bytes(OP_STORE, (uint8_t)i);
-            }
-
-            statement(); // body
-
-            // Final check of return type (simplified)
-            if (return_type != VAL_VOID && current_compiler->type_stack_ptr > 0) {
-                ValueType actual = type_pop();
-                if (!is_assignable(return_type, actual)) error_at(&name, "Return type mismatch.");
-            }
-
+            current_compiler->local_count = 0;
+            for (int i = 0; i < param_count; i++) add_local(params[i], param_types[i]);
+            for (int i = param_count - 1; i >= 0; i--) emit_bytes(OP_STORE, (uint8_t)i);
+            block();
             emit_byte(OP_RET);
-
             patch_int32(jump_over + 1, current_chunk->count);
             current_compiler->local_count = old_local_count;
-            current_compiler->type_stack_ptr = old_type_stack_ptr;
         } else {
-            error_at(&parser.current, "Top-level code is not allowed. All code must be inside functions.");
             advance();
         }
     }
 
-    // Auto-call main
     int main_idx = -1;
     for (int i = 0; i < current_compiler->function_count; i++) {
         if (current_compiler->functions[i].name.length == 4 &&
             memcmp(current_compiler->functions[i].name.start, "main", 4) == 0) {
-            main_idx = i;
-            break;
+            main_idx = i; break;
         }
     }
-
-    if (main_idx == -1) {
-        error_at(&parser.current, "No 'main' function defined.");
-    } else {
-        Function* f = &current_compiler->functions[main_idx];
-        if (f->param_count != 0) {
-            error_at(&f->name, "'main' function must have 0 parameters.");
-        }
+    if (main_idx != -1) {
         emit_byte(OP_CALL);
-        patch_int32(current_chunk->count, f->addr);
+        patch_int32(current_chunk->count, current_compiler->functions[main_idx].addr);
         current_chunk->count += 4;
     }
-
     emit_byte(OP_HALT);
-
-    if (parser.had_error) {
-        chunk_free(current_chunk);
-        free(current_compiler);
-        return NULL;
-    }
-
+    if (parser.had_error) { chunk_free(current_chunk); free(current_compiler); return NULL; }
     free(current_compiler);
     return current_chunk;
 }
@@ -713,9 +812,7 @@ Chunk* compiler_compile(const char* source) {
 void chunk_free(Chunk* chunk) {
     if (chunk) {
         free(chunk->code);
-        for (int i = 0; i < chunk->strings_count; i++) {
-            free(chunk->strings[i]);
-        }
+        for (int i = 0; i < chunk->strings_count; i++) free(chunk->strings[i]);
         free(chunk->strings);
         free(chunk);
     }

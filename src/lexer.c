@@ -113,8 +113,16 @@ static TokenType check_keyword(int start, int length, const char* rest, TokenTyp
 
 static TokenType identifier_type() {
     switch (lexer.start[0]) {
-        case 't': return check_keyword(1, 2, "ru", TOKEN_BOOL);
+        case 't': 
+            if (lexer.current - lexer.start > 1) {
+                switch (lexer.start[1]) {
+                    case 'r': return check_keyword(2, 1, "u", TOKEN_BOOL);
+                    case 'y': return check_keyword(2, 2, "pe", TOKEN_TYPE);
+                }
+            }
+            break;
         case 'f': return check_keyword(1, 2, "ls", TOKEN_BOOL);
+        case 's': return check_keyword(1, 5, "truct", TOKEN_STRUCT);
     }
     return TOKEN_ID;
 }
@@ -134,6 +142,7 @@ Token lexer_next_token() {
     if (isalpha(c) || c == '_') return identifier();
 
     switch (c) {
+        case '.': return make_token(TOKEN_DOT);
         case ':': return make_token(TOKEN_COLON);
         case ';': return make_token(TOKEN_SEMICOLON);
         case ',': return make_token(TOKEN_COMMA);

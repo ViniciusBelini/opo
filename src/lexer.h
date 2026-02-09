@@ -25,6 +25,8 @@ typedef enum {
     TOKEN_EQ_EQ,    // ==
     TOKEN_BANG_EQ,  // !=
     TOKEN_LTE, TOKEN_GTE,
+    TOKEN_DOT,
+    TOKEN_STRUCT, TOKEN_TYPE,
     TOKEN_EOF,
     TOKEN_ERROR
 } TokenType;

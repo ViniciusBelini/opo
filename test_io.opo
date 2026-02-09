@@ -1,0 +1,6 @@
+<> -> void: main [
+    "This is a test" => content: str
+    writeFile("test.txt", content) !!
+    readFile("test.txt") => read_back: str
+    read_back !!
+]

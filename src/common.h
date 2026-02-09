@@ -33,22 +33,45 @@ typedef enum {
     OP_CALL_PTR,
     OP_RET,
     OP_TYPEOF,
-    OP_PUSH_FUNC
+    OP_PUSH_FUNC,
+    OP_GET_MEMBER,
+    OP_SET_MEMBER,
+    OP_INDEX,
+    OP_CALL_NATIVE,
+    OP_ARRAY,
+    OP_STRUCT,
+    OP_INVOKE,
+    OP_LOAD_G
 } OpCode;
 
 typedef enum {
     VAL_INT,
     VAL_FLT,
     VAL_BOOL,
-    VAL_STR,
+    VAL_STR, // Legacy/Static strings
     VAL_VOID,
     VAL_FUNC,
     VAL_FUNC_INT,
     VAL_FUNC_FLT,
     VAL_FUNC_BOOL,
     VAL_FUNC_STR,
-    VAL_FUNC_VOID
+    VAL_FUNC_VOID,
+    VAL_OBJ
 } ValueType;
+
+typedef enum {
+    OBJ_STRING,
+    OBJ_ARRAY,
+    OBJ_STRUCT,
+    OBJ_NATIVE
+} ObjType;
+
+struct HeapObject {
+    ObjType type;
+    int ref_count;
+};
+
+typedef struct HeapObject HeapObject;
 
 typedef struct {
     ValueType type;
@@ -56,8 +79,38 @@ typedef struct {
         int64_t i_val;
         double f_val;
         bool b_val;
-        int s_idx; // Index into string table
+        int s_idx; // Index into static string table
+        HeapObject* obj;
     } as;
 } Value;
+
+typedef struct {
+    HeapObject obj;
+    char* chars;
+    int length;
+} ObjString;
+
+typedef struct {
+    HeapObject obj;
+    Value* items;
+    int count;
+    int capacity;
+} ObjArray;
+
+typedef struct {
+    HeapObject obj;
+    char** fields;
+    Value* values;
+    int field_count;
+} ObjStruct;
+
+typedef struct VM VM;
+typedef Value (*NativeFn)(VM* vm, int arg_count, Value* args);
+
+typedef struct {
+    HeapObject obj;
+    NativeFn function;
+    const char* name;
+} ObjNative;
 
 #endif

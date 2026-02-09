@@ -43,7 +43,7 @@ int main(int argc, char* argv[]) {
     if (chunk == NULL) return 65;
 
     VM vm;
-    vm_init(&vm, chunk->code, chunk->strings, chunk->strings_count);
+    vm_init(&vm, chunk->code, chunk->strings, chunk->strings_count, argc, argv);
     vm_run(&vm);
 
     // Clean up

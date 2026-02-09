@@ -13,7 +13,7 @@ typedef struct {
     int locals_offset;
 } CallFrame;
 
-typedef struct {
+struct VM {
     uint8_t* code;
     int ip;
     Value stack[STACK_MAX];
@@ -24,11 +24,19 @@ typedef struct {
     int frame_ptr;
     char** strings;
     int strings_count;
-} VM;
+    int argc;
+    char** argv;
+};
 
-void vm_init(VM* vm, uint8_t* code, char** strings, int strings_count);
+void vm_init(VM* vm, uint8_t* code, char** strings, int strings_count, int argc, char** argv);
 void vm_run(VM* vm);
 void vm_push(VM* vm, Value val);
 Value vm_pop(VM* vm);
+
+void retain(Value val);
+void release(Value val);
+
+ObjString* allocate_string(VM* vm, const char* chars, int length);
+ObjArray* allocate_array(VM* vm);
 
 #endif
