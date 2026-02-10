@@ -44,10 +44,14 @@ typedef enum {
     OP_LOAD_G,
     OP_POP,
     OP_MAP,
-    OP_SET_INDEX
+    OP_SET_INDEX,
+    OP_TRY,
+    OP_END_TRY,
+    OP_THROW
 } OpCode;
 
 typedef enum {
+    VAL_NONE,
     VAL_INT,
     VAL_FLT,
     VAL_BOOL,
@@ -62,8 +66,15 @@ typedef enum {
     VAL_OBJ,
     VAL_IMP,
     VAL_MAP,
+    VAL_ERR,
     VAL_ANY
 } ValueType;
+
+typedef uint32_t Type;
+#define TYPE_KIND(t) ((t) & 0xFF)
+#define TYPE_SUB(t) (((t) >> 8) & 0xFF)
+#define TYPE_KEY(t) (((t) >> 16) & 0xFF)
+#define MAKE_TYPE(kind, sub, key) ((Type)((kind) | ((sub) << 8) | ((key) << 16)))
 
 typedef enum {
     OBJ_STRING,
@@ -81,7 +92,7 @@ struct HeapObject {
 typedef struct HeapObject HeapObject;
 
 typedef struct {
-    ValueType type;
+    Type type;
     union {
         int64_t i_val;
         double f_val;

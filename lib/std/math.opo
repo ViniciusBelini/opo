@@ -1,0 +1,34 @@
+pub <> -> flt: PI [ 3.1415926535 ]
+pub <> -> flt: E [ 2.7182818284 ]
+
+pub <a: int, b: int> -> int: max [
+    a > b ? [ a ] : [ b ]
+]
+
+pub <a: int, b: int> -> int: min [
+    a < b ? [ a ] : [ b ]
+]
+
+pub <n: int> -> int: abs [
+    n < 0 ? [ -n ] : [ n ]
+]
+
+pub <base: int, exp: int> -> int: pow [
+    exp == 0 ? [ 1 ] : [
+        exp % 2 == 0 ? [
+            pow(base * base, exp / 2)
+        ] : [
+            base * pow(base, exp - 1)
+        ]
+    ]
+]
+
+pub <n: int> -> int: factorial [
+    n <= 1 ? [ 1 ] : [ n * factorial(n - 1) ]
+]
+
+pub <x: flt> -> flt: sqrt_f [ sqrt(x) ]
+pub <x: flt> -> flt: sin_f [ sin(x) ]
+pub <x: flt> -> flt: cos_f [ cos(x) ]
+pub <x: flt> -> flt: tan_f [ tan(x) ]
+pub <x: flt> -> flt: log_f [ log(x) ]

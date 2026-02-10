@@ -1,0 +1,9 @@
+pub <t: int> -> str: format [
+    # Very simple format for now as we don't have structured time yet
+    # Just return the timestamp as string
+    str(t)
+]
+
+pub <> -> int: now [
+    time()
+]

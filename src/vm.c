@@ -1,10 +1,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <math.h>
 #include "vm.h"
 
 void retain(Value val) {
-    if (val.type == VAL_OBJ && val.as.obj != NULL) {
+    if (TYPE_KIND(val.type) == VAL_OBJ && val.as.obj != NULL) {
         val.as.obj->ref_count++;
     }
 }
@@ -59,7 +61,7 @@ static void free_object(HeapObject* obj) {
 }
 
 void release(Value val) {
-    if (val.type == VAL_OBJ && val.as.obj != NULL) {
+    if (TYPE_KIND(val.type) == VAL_OBJ && val.as.obj != NULL) {
         val.as.obj->ref_count--;
         if (val.as.obj->ref_count <= 0) {
             free_object(val.as.obj);
@@ -104,7 +106,7 @@ ObjMap* allocate_map(VM* vm) {
 }
 
 static uint32_t hash_value(Value v) {
-    switch (v.type) {
+    switch (TYPE_KIND(v.type)) {
         case VAL_INT: return (uint32_t)v.as.i_val;
         case VAL_FLT: {
             union { double d; uint32_t u[2]; } conv;
@@ -128,8 +130,8 @@ static uint32_t hash_value(Value v) {
 }
 
 static bool values_equal(Value a, Value b) {
-    if (a.type != b.type) return false;
-    switch (a.type) {
+    if (TYPE_KIND(a.type) != TYPE_KIND(b.type)) return false;
+    switch (TYPE_KIND(a.type)) {
         case VAL_INT: return a.as.i_val == b.as.i_val;
         case VAL_FLT: return a.as.f_val == b.as.f_val;
         case VAL_BOOL: return a.as.b_val == b.as.b_val;
@@ -200,7 +202,7 @@ static Value native_len(VM* vm, int arg_count, Value* args) {
     (void)vm;
     if (arg_count != 1) return (Value){VAL_VOID, {0}};
     Value obj = args[0];
-    if (obj.type == VAL_OBJ || obj.type == VAL_MAP) {
+    if (TYPE_KIND(obj.type) == VAL_OBJ || TYPE_KIND(obj.type) == VAL_MAP) {
         if (obj.as.obj->type == OBJ_STRING) return (Value){VAL_INT, {.i_val = ((ObjString*)obj.as.obj)->length}};
         if (obj.as.obj->type == OBJ_ARRAY) return (Value){VAL_INT, {.i_val = ((ObjArray*)obj.as.obj)->count}};
         if (obj.as.obj->type == OBJ_MAP) return (Value){VAL_INT, {.i_val = ((ObjMap*)obj.as.obj)->count}};
@@ -213,7 +215,7 @@ static Value native_append(VM* vm, int arg_count, Value* args) {
     if (arg_count != 2) return (Value){VAL_VOID, {0}};
     Value obj = args[0];
     Value val = args[1];
-    if (obj.type == VAL_OBJ && obj.as.obj->type == OBJ_ARRAY) {
+    if (TYPE_KIND(obj.type) == VAL_OBJ && obj.as.obj->type == OBJ_ARRAY) {
         ObjArray* array = (ObjArray*)obj.as.obj;
         if (array->count >= array->capacity) {
             array->capacity = array->capacity < 8 ? 8 : array->capacity * 2;
@@ -228,15 +230,50 @@ static Value native_append(VM* vm, int arg_count, Value* args) {
 static Value native_str(VM* vm, int arg_count, Value* args) {
     if (arg_count != 1) return (Value){VAL_VOID, {0}};
     Value val = args[0];
-    char buf[128];
-    if (val.type == VAL_INT) sprintf(buf, "%ld", val.as.i_val);
-    else if (val.type == VAL_FLT) sprintf(buf, "%g", val.as.f_val);
-    else if (val.type == VAL_BOOL) sprintf(buf, "%s", val.as.b_val ? "tru" : "fls");
-    else if ((val.type == VAL_OBJ || val.type == VAL_MAP) && val.as.obj->type == OBJ_STRING) {
+    char buf[1024]; // Larger buffer for collections
+    if (TYPE_KIND(val.type) == VAL_INT) sprintf(buf, "%ld", val.as.i_val);
+    else if (TYPE_KIND(val.type) == VAL_FLT) sprintf(buf, "%g", val.as.f_val);
+    else if (TYPE_KIND(val.type) == VAL_BOOL) sprintf(buf, "%s", val.as.b_val ? "tru" : "fls");
+    else if (TYPE_KIND(val.type) == VAL_VOID) strcpy(buf, "void");
+    else if (TYPE_KIND(val.type) == VAL_STR || (TYPE_KIND(val.type) == VAL_OBJ && val.as.obj->type == OBJ_STRING)) {
         retain(val);
         return val;
     }
-    else if ((val.type == VAL_OBJ || val.type == VAL_MAP) && val.as.obj->type == OBJ_MAP) sprintf(buf, "<map of %d>", ((ObjMap*)val.as.obj)->count);
+    else if (TYPE_KIND(val.type) == VAL_OBJ && val.as.obj->type == OBJ_ARRAY) {
+        ObjArray* array = (ObjArray*)val.as.obj;
+        strcpy(buf, "[");
+        for (int i = 0; i < array->count; i++) {
+            Value s = native_str(vm, 1, &array->items[i]);
+            strcat(buf, ((ObjString*)s.as.obj)->chars);
+            if (i < array->count - 1) strcat(buf, ", ");
+            release(s);
+        }
+        strcat(buf, "]");
+    }
+    else if ((TYPE_KIND(val.type) == VAL_OBJ || TYPE_KIND(val.type) == VAL_MAP) && val.as.obj->type == OBJ_MAP) {
+        ObjMap* map = (ObjMap*)val.as.obj;
+        strcpy(buf, "{");
+        bool first = true;
+        for (int i = 0; i < map->capacity; i++) {
+            if (map->entries[i].is_used) {
+                if (!first) strcat(buf, ", ");
+                Value sk = native_str(vm, 1, &map->entries[i].key);
+                Value sv = native_str(vm, 1, &map->entries[i].value);
+                strcat(buf, ((ObjString*)sk.as.obj)->chars);
+                strcat(buf, " => ");
+                strcat(buf, ((ObjString*)sv.as.obj)->chars);
+                release(sk); release(sv);
+                first = false;
+            }
+        }
+        strcat(buf, "}");
+    }
+    else if (TYPE_KIND(val.type) == VAL_ERR) {
+        Value inner = {VAL_OBJ, val.as};
+        Value s = native_str(vm, 1, &inner);
+        sprintf(buf, "Error: %s", ((ObjString*)s.as.obj)->chars);
+        release(s);
+    }
     else sprintf(buf, "<obj>");
     
     ObjString* s = allocate_string(vm, buf, (int)strlen(buf));
@@ -292,9 +329,9 @@ static Value native_int(VM* vm, int arg_count, Value* args) {
     (void)vm;
     if (arg_count != 1) return (Value){VAL_VOID, {0}};
     Value val = args[0];
-    if (val.type == VAL_INT) return val;
-    if (val.type == VAL_FLT) return (Value){VAL_INT, {.i_val = (int64_t)val.as.f_val}};
-    if ((val.type == VAL_OBJ || val.type == VAL_MAP) && val.as.obj->type == OBJ_STRING) {
+    if (TYPE_KIND(val.type) == VAL_INT) return val;
+    if (TYPE_KIND(val.type) == VAL_FLT) return (Value){VAL_INT, {.i_val = (int64_t)val.as.f_val}};
+    if ((TYPE_KIND(val.type) == VAL_OBJ || TYPE_KIND(val.type) == VAL_MAP) && val.as.obj->type == OBJ_STRING) {
         return (Value){VAL_INT, {.i_val = strtoll(((ObjString*)val.as.obj)->chars, NULL, 10)}};
     }
     return (Value){VAL_INT, {.i_val = 0}};
@@ -332,6 +369,201 @@ static Value native_readLine(VM* vm, int arg_count, Value* args) {
     return (Value){VAL_OBJ, {.obj = (HeapObject*)allocate_string(vm, "", 0)}};
 }
 
+static Value native_exit(VM* vm, int arg_count, Value* args) {
+    (void)vm;
+    int code = 0;
+    if (arg_count > 0 && args[0].type == VAL_INT) code = (int)args[0].as.i_val;
+    exit(code);
+    return (Value){VAL_VOID, {0}};
+}
+
+static Value native_clock(VM* vm, int arg_count, Value* args) {
+    (void)vm; (void)arg_count; (void)args;
+    return (Value){VAL_FLT, {.f_val = (double)clock() / CLOCKS_PER_SEC}};
+}
+
+static Value native_system(VM* vm, int arg_count, Value* args) {
+    (void)vm;
+    if (arg_count != 1 || args[0].type != VAL_OBJ || args[0].as.obj->type != OBJ_STRING) return (Value){VAL_INT, {.i_val = -1}};
+    int res = system(((ObjString*)args[0].as.obj)->chars);
+    return (Value){VAL_INT, {.i_val = res}};
+}
+
+static Value native_keys(VM* vm, int arg_count, Value* args) {
+    if (arg_count != 1 || args[0].type != VAL_OBJ || args[0].as.obj->type != OBJ_MAP) return (Value){VAL_VOID, {0}};
+    ObjMap* map = (ObjMap*)args[0].as.obj;
+    ObjArray* array = allocate_array(vm);
+    array->items = malloc(sizeof(Value) * map->count);
+    array->capacity = map->count;
+    array->count = 0;
+    for (int i = 0; i < map->capacity; i++) {
+        if (map->entries[i].is_used) {
+            array->items[array->count] = map->entries[i].key;
+            retain(array->items[array->count]);
+            array->count++;
+        }
+    }
+    return (Value){VAL_OBJ, {.obj = (HeapObject*)array}};
+}
+
+static Value native_delete(VM* vm, int arg_count, Value* args) {
+    (void)vm;
+    if (arg_count != 2 || args[0].type != VAL_OBJ || args[0].as.obj->type != OBJ_MAP) return (Value){VAL_VOID, {0}};
+    ObjMap* map = (ObjMap*)args[0].as.obj;
+    Value key = args[1];
+    
+    if (map->capacity == 0) return (Value){VAL_VOID, {0}};
+    uint32_t hash = hash_value(key);
+    int index = hash % map->capacity;
+    while (map->entries[index].is_used) {
+        if (values_equal(map->entries[index].key, key)) {
+            release(map->entries[index].key);
+            release(map->entries[index].value);
+            map->count--;
+            
+            // Re-hash the cluster to avoid breaking linear probing
+            int i = index;
+            int j = i;
+            while (true) {
+                j = (j + 1) % map->capacity;
+                if (!map->entries[j].is_used) break;
+                
+                uint32_t k_hash = hash_value(map->entries[j].key);
+                int k = k_hash % map->capacity;
+                
+                // Determine if k is cyclically between i and j
+                bool between = false;
+                if (i <= j) {
+                    if (i < k && k <= j) between = true;
+                } else {
+                    if (i < k || k <= j) between = true;
+                }
+                
+                if (!between) {
+                    map->entries[i] = map->entries[j];
+                    i = j;
+                }
+            }
+            map->entries[i].is_used = false;
+            map->entries[i].key = (Value){VAL_VOID, {0}};
+            map->entries[i].value = (Value){VAL_VOID, {0}};
+            return (Value){VAL_VOID, {0}};
+        }
+        index = (index + 1) % map->capacity;
+    }
+    return (Value){VAL_VOID, {0}};
+}
+
+static Value native_ascii(VM* vm, int arg_count, Value* args) {
+    (void)vm;
+    if (arg_count != 1 || args[0].type != VAL_OBJ || args[0].as.obj->type != OBJ_STRING) return (Value){VAL_INT, {.i_val = 0}};
+    ObjString* s = (ObjString*)args[0].as.obj;
+    if (s->length == 0) return (Value){VAL_INT, {.i_val = 0}};
+    return (Value){VAL_INT, {.i_val = (uint8_t)s->chars[0]}};
+}
+
+static Value native_char(VM* vm, int arg_count, Value* args) {
+    if (arg_count != 1 || TYPE_KIND(args[0].type) != VAL_INT) return (Value){VAL_VOID, {0}};
+    char c = (char)args[0].as.i_val;
+    ObjString* s = allocate_string(vm, &c, 1);
+    return (Value){VAL_OBJ, {.obj = (HeapObject*)s}};
+}
+
+static char* type_to_string(Type t, char* buf) {
+    int kind = TYPE_KIND(t);
+    int sub = TYPE_SUB(t);
+    int key = TYPE_KEY(t);
+    
+    switch (kind) {
+        case VAL_INT: strcpy(buf, "int"); break;
+        case VAL_FLT: strcpy(buf, "flt"); break;
+        case VAL_BOOL: strcpy(buf, "bol"); break;
+        case VAL_STR: strcpy(buf, "str"); break;
+        case VAL_VOID: strcpy(buf, "void"); break;
+        case VAL_ERR: strcpy(buf, "err"); break;
+        case VAL_ANY: strcpy(buf, "any"); break;
+        case VAL_OBJ: {
+            if (sub == 0 || sub == VAL_STR) strcpy(buf, "str");
+            else {
+                char sub_buf[64];
+                sprintf(buf, "[]%s", type_to_string(sub, sub_buf));
+            }
+            break;
+        }
+        case VAL_MAP: {
+            char sub_buf[64], key_buf[64];
+            sprintf(buf, "{%s:%s}", type_to_string(key, key_buf), type_to_string(sub, sub_buf));
+            break;
+        }
+        case VAL_FUNC:
+        case VAL_FUNC_INT:
+        case VAL_FUNC_FLT:
+        case VAL_FUNC_BOOL:
+        case VAL_FUNC_STR:
+        case VAL_FUNC_VOID:
+            strcpy(buf, "fun");
+            break;
+        default: strcpy(buf, "unknown"); break;
+    }
+    return buf;
+}
+
+static Value native_has(VM* vm, int arg_count, Value* args) {
+    (void)vm;
+    if (arg_count != 2 || TYPE_KIND(args[0].type) != VAL_OBJ || args[0].as.obj->type != OBJ_MAP) return (Value){VAL_BOOL, {.b_val = false}};
+    ObjMap* map = (ObjMap*)args[0].as.obj;
+    Value val = map_get(map, args[1]);
+    return (Value){VAL_BOOL, {.b_val = TYPE_KIND(val.type) != VAL_VOID}};
+}
+
+static Value native_error(VM* vm, int arg_count, Value* args) {
+    (void)vm;
+    if (arg_count != 1) return (Value){VAL_ERR, {0}};
+    Value err = args[0];
+    retain(err);
+    return (Value){VAL_ERR, err.as};
+}
+
+static Value native_time(VM* vm, int arg_count, Value* args) {
+    (void)vm; (void)arg_count; (void)args;
+    return (Value){VAL_INT, {.i_val = (int64_t)time(NULL)}};
+}
+
+static Value native_sqrt(VM* vm, int arg_count, Value* args) {
+    (void)vm;
+    if (arg_count != 1) return (Value){VAL_FLT, {.f_val = 0}};
+    double val = TYPE_KIND(args[0].type) == VAL_INT ? (double)args[0].as.i_val : args[0].as.f_val;
+    return (Value){VAL_FLT, {.f_val = sqrt(val)}};
+}
+
+static Value native_sin(VM* vm, int arg_count, Value* args) {
+    (void)vm;
+    if (arg_count != 1) return (Value){VAL_FLT, {.f_val = 0}};
+    double val = TYPE_KIND(args[0].type) == VAL_INT ? (double)args[0].as.i_val : args[0].as.f_val;
+    return (Value){VAL_FLT, {.f_val = sin(val)}};
+}
+
+static Value native_cos(VM* vm, int arg_count, Value* args) {
+    (void)vm;
+    if (arg_count != 1) return (Value){VAL_FLT, {.f_val = 0}};
+    double val = TYPE_KIND(args[0].type) == VAL_INT ? (double)args[0].as.i_val : args[0].as.f_val;
+    return (Value){VAL_FLT, {.f_val = cos(val)}};
+}
+
+static Value native_tan(VM* vm, int arg_count, Value* args) {
+    (void)vm;
+    if (arg_count != 1) return (Value){VAL_FLT, {.f_val = 0}};
+    double val = TYPE_KIND(args[0].type) == VAL_INT ? (double)args[0].as.i_val : args[0].as.f_val;
+    return (Value){VAL_FLT, {.f_val = tan(val)}};
+}
+
+static Value native_log(VM* vm, int arg_count, Value* args) {
+    (void)vm;
+    if (arg_count != 1) return (Value){VAL_FLT, {.f_val = 0}};
+    double val = TYPE_KIND(args[0].type) == VAL_INT ? (double)args[0].as.i_val : args[0].as.f_val;
+    return (Value){VAL_FLT, {.f_val = log(val)}};
+}
+
 void vm_define_native(VM* vm, const char* name, NativeFn function, int index) {
     ObjNative* native = malloc(sizeof(ObjNative));
     native->obj.type = OBJ_NATIVE;
@@ -347,6 +579,7 @@ void vm_init(VM* vm, uint8_t* code, char** strings, int strings_count, int argc,
     vm->stack_ptr = 0;
     vm->locals_ptr = 0;
     vm->frame_ptr = 1;
+    vm->try_ptr = 0;
     vm->frames[0].locals_offset = 0;
     vm->frames[0].return_addr = -1;
     vm->strings = strings;
@@ -367,6 +600,21 @@ void vm_init(VM* vm, uint8_t* code, char** strings, int strings_count, int argc,
     vm_define_native(vm, "print", native_print, 7);
     vm_define_native(vm, "println", native_println, 8);
     vm_define_native(vm, "readLine", native_readLine, 9);
+    vm_define_native(vm, "exit", native_exit, 10);
+    vm_define_native(vm, "clock", native_clock, 11);
+    vm_define_native(vm, "system", native_system, 12);
+    vm_define_native(vm, "keys", native_keys, 13);
+    vm_define_native(vm, "delete", native_delete, 14);
+    vm_define_native(vm, "ascii", native_ascii, 15);
+    vm_define_native(vm, "char", native_char, 16);
+    vm_define_native(vm, "has", native_has, 17);
+    vm_define_native(vm, "error", native_error, 18);
+    vm_define_native(vm, "time", native_time, 19);
+    vm_define_native(vm, "sqrt", native_sqrt, 20);
+    vm_define_native(vm, "sin", native_sin, 21);
+    vm_define_native(vm, "cos", native_cos, 22);
+    vm_define_native(vm, "tan", native_tan, 23);
+    vm_define_native(vm, "log", native_log, 24);
 }
 
 void vm_push(VM* vm, Value val) {
@@ -432,48 +680,18 @@ void vm_run(VM* vm) {
             }
             case OP_PRINT: {
                 Value val = vm_pop(vm);
-                switch (val.type) {
-                    case VAL_INT: printf("%ld\n", val.as.i_val); break;
-                    case VAL_FLT: printf("%g\n", val.as.f_val); break;
-                    case VAL_BOOL: printf(val.as.b_val ? "tru\n" : "fls\n"); break;
-                    case VAL_STR: printf("%s\n", vm->strings[val.as.s_idx]); break;
-                    case VAL_VOID: printf("void\n"); break;
-                    case VAL_FUNC:
-                    case VAL_FUNC_INT:
-                    case VAL_FUNC_FLT:
-                    case VAL_FUNC_BOOL:
-                    case VAL_FUNC_STR:
-                    case VAL_FUNC_VOID:
-                    case VAL_IMP:
-                        printf("<fun at %ld>\n", val.as.i_val);
-                        break;
-                    case VAL_MAP:
-                        printf("<map>\n");
-                        break;
-                    case VAL_ANY:
-                        printf("<any>\n");
-                        break;
-                    case VAL_OBJ: {
-                        HeapObject* obj = val.as.obj;
-                        switch (obj->type) {
-                            case OBJ_STRING: printf("%s\n", ((ObjString*)obj)->chars); break;
-                            case OBJ_ARRAY: printf("<array of %d>\n", ((ObjArray*)obj)->count); break;
-                            case OBJ_STRUCT: printf("<struct>\n"); break;
-                            case OBJ_NATIVE: printf("<native fun %s>\n", ((ObjNative*)obj)->name); break;
-                            case OBJ_MAP: printf("<map of %d>\n", ((ObjMap*)obj)->count); break;
-                        }
-                        break;
-                    }
-                }
+                Value s = native_str(vm, 1, &val);
+                printf("%s\n", ((ObjString*)s.as.obj)->chars);
+                release(s);
                 release(val);
                 break;
             }
             case OP_LTE: {
                 Value b = vm_pop(vm);
                 Value a = vm_pop(vm);
-                if (a.type == VAL_INT && b.type == VAL_INT) {
+                if (TYPE_KIND(a.type) == VAL_INT && TYPE_KIND(b.type) == VAL_INT) {
                     vm_push(vm, (Value){VAL_BOOL, {.b_val = a.as.i_val <= b.as.i_val}});
-                } else if (a.type == VAL_FLT && b.type == VAL_FLT) {
+                } else if (TYPE_KIND(a.type) == VAL_FLT && TYPE_KIND(b.type) == VAL_FLT) {
                     vm_push(vm, (Value){VAL_BOOL, {.b_val = a.as.f_val <= b.as.f_val}});
                 } else {
                     fprintf(stderr, "Type error in LTE\n");
@@ -485,9 +703,9 @@ void vm_run(VM* vm) {
             case OP_GTE: {
                 Value b = vm_pop(vm);
                 Value a = vm_pop(vm);
-                if (a.type == VAL_INT && b.type == VAL_INT) {
+                if (TYPE_KIND(a.type) == VAL_INT && TYPE_KIND(b.type) == VAL_INT) {
                     vm_push(vm, (Value){VAL_BOOL, {.b_val = a.as.i_val >= b.as.i_val}});
-                } else if (a.type == VAL_FLT && b.type == VAL_FLT) {
+                } else if (TYPE_KIND(a.type) == VAL_FLT && TYPE_KIND(b.type) == VAL_FLT) {
                     vm_push(vm, (Value){VAL_BOOL, {.b_val = a.as.f_val >= b.as.f_val}});
                 } else {
                     fprintf(stderr, "Type error in GTE\n");
@@ -498,9 +716,9 @@ void vm_run(VM* vm) {
             }
             case OP_NEG: {
                 Value a = vm_pop(vm);
-                if (a.type == VAL_INT) {
+                if (TYPE_KIND(a.type) == VAL_INT) {
                     vm_push(vm, (Value){VAL_INT, {.i_val = -a.as.i_val}});
-                } else if (a.type == VAL_FLT) {
+                } else if (TYPE_KIND(a.type) == VAL_FLT) {
                     vm_push(vm, (Value){VAL_FLT, {.f_val = -a.as.f_val}});
                 } else {
                     fprintf(stderr, "Type error in NEG\n");
@@ -512,7 +730,7 @@ void vm_run(VM* vm) {
             case OP_MOD: {
                 Value b = vm_pop(vm);
                 Value a = vm_pop(vm);
-                if (a.type == VAL_INT && b.type == VAL_INT) {
+                if (TYPE_KIND(a.type) == VAL_INT && TYPE_KIND(b.type) == VAL_INT) {
                     if (b.as.i_val == 0) {
                         fprintf(stderr, "Division by zero\n");
                         exit(1);
@@ -548,9 +766,9 @@ void vm_run(VM* vm) {
             case OP_GT: {
                 Value b = vm_pop(vm);
                 Value a = vm_pop(vm);
-                if (a.type == VAL_INT && b.type == VAL_INT) {
+                if (TYPE_KIND(a.type) == VAL_INT && TYPE_KIND(b.type) == VAL_INT) {
                     vm_push(vm, (Value){VAL_BOOL, {.b_val = a.as.i_val > b.as.i_val}});
-                } else if (a.type == VAL_FLT && b.type == VAL_FLT) {
+                } else if (TYPE_KIND(a.type) == VAL_FLT && TYPE_KIND(b.type) == VAL_FLT) {
                     vm_push(vm, (Value){VAL_BOOL, {.b_val = a.as.f_val > b.as.f_val}});
                 } else {
                     fprintf(stderr, "Type error in GT\n");
@@ -562,11 +780,11 @@ void vm_run(VM* vm) {
             case OP_ADD: {
                 Value b = vm_pop(vm);
                 Value a = vm_pop(vm);
-                if (a.type == VAL_INT && b.type == VAL_INT) {
+                if (TYPE_KIND(a.type) == VAL_INT && TYPE_KIND(b.type) == VAL_INT) {
                     vm_push(vm, (Value){VAL_INT, {.i_val = a.as.i_val + b.as.i_val}});
-                } else if (a.type == VAL_FLT && b.type == VAL_FLT) {
+                } else if (TYPE_KIND(a.type) == VAL_FLT && TYPE_KIND(b.type) == VAL_FLT) {
                     vm_push(vm, (Value){VAL_FLT, {.f_val = a.as.f_val + b.as.f_val}});
-                } else if (a.type == VAL_OBJ && a.as.obj->type == OBJ_STRING && b.type == VAL_OBJ && b.as.obj->type == OBJ_STRING) {
+                } else if (TYPE_KIND(a.type) == VAL_OBJ && a.as.obj->type == OBJ_STRING && TYPE_KIND(b.type) == VAL_OBJ && b.as.obj->type == OBJ_STRING) {
                     ObjString* sa = (ObjString*)a.as.obj;
                     ObjString* sb = (ObjString*)b.as.obj;
                     int new_len = sa->length + sb->length;
@@ -584,9 +802,9 @@ void vm_run(VM* vm) {
             case OP_SUB: {
                 Value b = vm_pop(vm);
                 Value a = vm_pop(vm);
-                if (a.type == VAL_INT && b.type == VAL_INT) {
+                if (TYPE_KIND(a.type) == VAL_INT && TYPE_KIND(b.type) == VAL_INT) {
                     vm_push(vm, (Value){VAL_INT, {.i_val = a.as.i_val - b.as.i_val}});
-                } else if (a.type == VAL_FLT && b.type == VAL_FLT) {
+                } else if (TYPE_KIND(a.type) == VAL_FLT && TYPE_KIND(b.type) == VAL_FLT) {
                     vm_push(vm, (Value){VAL_FLT, {.f_val = a.as.f_val - b.as.f_val}});
                 } else {
                     fprintf(stderr, "Type error in SUB\n");
@@ -598,9 +816,9 @@ void vm_run(VM* vm) {
             case OP_MUL: {
                 Value b = vm_pop(vm);
                 Value a = vm_pop(vm);
-                if (a.type == VAL_INT && b.type == VAL_INT) {
+                if (TYPE_KIND(a.type) == VAL_INT && TYPE_KIND(b.type) == VAL_INT) {
                     vm_push(vm, (Value){VAL_INT, {.i_val = a.as.i_val * b.as.i_val}});
-                } else if (a.type == VAL_FLT && b.type == VAL_FLT) {
+                } else if (TYPE_KIND(a.type) == VAL_FLT && TYPE_KIND(b.type) == VAL_FLT) {
                     vm_push(vm, (Value){VAL_FLT, {.f_val = a.as.f_val * b.as.f_val}});
                 } else {
                     fprintf(stderr, "Type error in MUL\n");
@@ -612,10 +830,10 @@ void vm_run(VM* vm) {
             case OP_DIV: {
                 Value b = vm_pop(vm);
                 Value a = vm_pop(vm);
-                if (a.type == VAL_INT && b.type == VAL_INT) {
+                if (TYPE_KIND(a.type) == VAL_INT && TYPE_KIND(b.type) == VAL_INT) {
                     if (b.as.i_val == 0) { fprintf(stderr, "Division by zero\n"); exit(1); }
                     vm_push(vm, (Value){VAL_INT, {.i_val = a.as.i_val / b.as.i_val}});
-                } else if (a.type == VAL_FLT && b.type == VAL_FLT) {
+                } else if (TYPE_KIND(a.type) == VAL_FLT && TYPE_KIND(b.type) == VAL_FLT) {
                     if (b.as.f_val == 0) { fprintf(stderr, "Division by zero\n"); exit(1); }
                     vm_push(vm, (Value){VAL_FLT, {.f_val = a.as.f_val / b.as.f_val}});
                 } else {
@@ -629,10 +847,10 @@ void vm_run(VM* vm) {
                 Value b = vm_pop(vm);
                 Value a = vm_pop(vm);
                 bool res = false;
-                if (a.type == b.type) {
-                    if (a.type == VAL_INT) res = a.as.i_val == b.as.i_val;
-                    else if (a.type == VAL_BOOL) res = a.as.b_val == b.as.b_val;
-                    else if (a.type == VAL_OBJ && b.type == VAL_OBJ) {
+                if (TYPE_KIND(a.type) == TYPE_KIND(b.type)) {
+                    if (TYPE_KIND(a.type) == VAL_INT) res = a.as.i_val == b.as.i_val;
+                    else if (TYPE_KIND(a.type) == VAL_BOOL) res = a.as.b_val == b.as.b_val;
+                    else if (TYPE_KIND(a.type) == VAL_OBJ && TYPE_KIND(b.type) == VAL_OBJ) {
                         if (a.as.obj->type == OBJ_STRING && b.as.obj->type == OBJ_STRING) {
                             res = strcmp(((ObjString*)a.as.obj)->chars, ((ObjString*)b.as.obj)->chars) == 0;
                         } else {
@@ -647,9 +865,9 @@ void vm_run(VM* vm) {
             case OP_LT: {
                 Value b = vm_pop(vm);
                 Value a = vm_pop(vm);
-                if (a.type == VAL_INT && b.type == VAL_INT) {
+                if (TYPE_KIND(a.type) == VAL_INT && TYPE_KIND(b.type) == VAL_INT) {
                     vm_push(vm, (Value){VAL_BOOL, {.b_val = a.as.i_val < b.as.i_val}});
-                } else if (a.type == VAL_FLT && b.type == VAL_FLT) {
+                } else if (TYPE_KIND(a.type) == VAL_FLT && TYPE_KIND(b.type) == VAL_FLT) {
                     vm_push(vm, (Value){VAL_BOOL, {.b_val = a.as.f_val < b.as.f_val}});
                 } else {
                     fprintf(stderr, "Type error in LT\n");
@@ -716,19 +934,10 @@ void vm_run(VM* vm) {
             }
             case OP_TYPEOF: {
                 Value val = vm_pop(vm);
-                int type_idx = (int)val.type;
-                if (type_idx == VAL_OBJ) {
-                    HeapObject* obj = val.as.obj;
-                    switch (obj->type) {
-                        case OBJ_STRING: type_idx = 3; break;
-                        case OBJ_ARRAY: type_idx = 5; break;
-                        case OBJ_STRUCT: type_idx = 5; break;
-                        case OBJ_NATIVE: type_idx = 5; break;
-                        case OBJ_MAP: type_idx = 5; break;
-                    }
-                }
-                if (type_idx > 5) type_idx = 5;
-                vm_push(vm, (Value){VAL_STR, {.s_idx = type_idx}});
+                char buf[256];
+                type_to_string(val.type, buf);
+                ObjString* s = allocate_string(vm, buf, strlen(buf));
+                vm_push(vm, (Value){VAL_OBJ, {.obj = (HeapObject*)s}});
                 release(val);
                 break;
             }
@@ -741,30 +950,40 @@ void vm_run(VM* vm) {
             case OP_INDEX: {
                 Value index = vm_pop(vm);
                 Value obj = vm_pop(vm);
-                if (obj.type == VAL_OBJ && obj.as.obj->type == OBJ_ARRAY) {
+                if (TYPE_KIND(obj.type) == VAL_OBJ && obj.as.obj->type == OBJ_ARRAY) {
                     ObjArray* array = (ObjArray*)obj.as.obj;
                     int idx = (int)index.as.i_val;
-                    if (idx < 0 || idx >= array->count) { fprintf(stderr, "Array index out of bounds\n"); exit(1); }
+                    if (idx < 0 || idx >= array->count) {
+                        fprintf(stderr, "Runtime Error: Array index %d out of bounds (length %d)\n", idx, array->count);
+                        exit(1);
+                    }
                     vm_push(vm, array->items[idx]);
-                } else if (obj.type == VAL_OBJ && obj.as.obj->type == OBJ_STRING) {
+                } else if (TYPE_KIND(obj.type) == VAL_OBJ && obj.as.obj->type == OBJ_STRING) {
                     ObjString* s = (ObjString*)obj.as.obj;
                     int idx = (int)index.as.i_val;
-                    if (idx < 0 || idx >= s->length) { fprintf(stderr, "String index out of bounds\n"); exit(1); }
+                    if (idx < 0 || idx >= s->length) {
+                        fprintf(stderr, "Runtime Error: String index %d out of bounds (length %d)\n", idx, s->length);
+                        exit(1);
+                    }
                     char buf[2] = {s->chars[idx], '\0'};
                     ObjString* res = allocate_string(vm, buf, 1);
                     vm_push(vm, (Value){VAL_OBJ, {.obj = (HeapObject*)res}});
-                } else if (obj.type == VAL_OBJ && obj.as.obj->type == OBJ_MAP) {
+                } else if (TYPE_KIND(obj.type) == VAL_OBJ && obj.as.obj->type == OBJ_MAP) {
                     ObjMap* map = (ObjMap*)obj.as.obj;
                     Value val = map_get(map, index);
+                    if (TYPE_KIND(val.type) == VAL_VOID) {
+                        fprintf(stderr, "Runtime Error: Key not found in map.\n");
+                        exit(1);
+                    }
                     vm_push(vm, val);
-                } else { fprintf(stderr, "Can only index arrays, strings or maps\n"); exit(1); }
+                } else { fprintf(stderr, "Runtime Error: Can only index arrays, strings or maps. Got type kind %d\n", TYPE_KIND(obj.type)); exit(1); }
                 release(obj); release(index);
                 break;
             }
             case OP_GET_MEMBER: {
                 int field_idx = vm->code[vm->ip++];
                 Value obj = vm_pop(vm);
-                if (obj.type != VAL_OBJ || obj.as.obj->type != OBJ_STRUCT) { fprintf(stderr, "Can only get member\n"); exit(1); }
+                if (TYPE_KIND(obj.type) != VAL_OBJ || obj.as.obj->type != OBJ_STRUCT) { fprintf(stderr, "Can only get member\n"); exit(1); }
                 ObjStruct* st = (ObjStruct*)obj.as.obj;
                 vm_push(vm, st->values[field_idx]);
                 release(obj);
@@ -774,7 +993,7 @@ void vm_run(VM* vm) {
                 int field_idx = vm->code[vm->ip++];
                 Value obj = vm_pop(vm);
                 Value val = vm_pop(vm);
-                if (obj.type != VAL_OBJ || obj.as.obj->type != OBJ_STRUCT) { fprintf(stderr, "Can only set member\n"); exit(1); }
+                if (TYPE_KIND(obj.type) != VAL_OBJ || obj.as.obj->type != OBJ_STRUCT) { fprintf(stderr, "Can only set member\n"); exit(1); }
                 ObjStruct* st = (ObjStruct*)obj.as.obj;
                 release(st->values[field_idx]);
                 retain(val);
@@ -782,18 +1001,53 @@ void vm_run(VM* vm) {
                 release(obj); release(val);
                 break;
             }
+            case OP_TRY: {
+                int32_t handler = read_int32(vm);
+                if (vm->try_ptr >= TRY_STACK_MAX) { fprintf(stderr, "Try stack overflow\n"); exit(1); }
+                vm->try_stack[vm->try_ptr++] = (TryFrame){handler, vm->stack_ptr, vm->frame_ptr};
+                break;
+            }
+            case OP_END_TRY: {
+                if (vm->try_ptr > 0) vm->try_ptr--;
+                break;
+            }
+            case OP_THROW: {
+                Value err = vm_pop(vm);
+                if (vm->try_ptr == 0) {
+                    fprintf(stderr, "Unhandled Exception: ");
+                    Value s = native_str(vm, 1, &err);
+                    printf("%s\n", ((ObjString*)s.as.obj)->chars);
+                    release(s);
+                    exit(1);
+                }
+                TryFrame frame = vm->try_stack[--vm->try_ptr];
+                while (vm->stack_ptr > frame.stack_ptr) release(vm_pop(vm));
+                while (vm->frame_ptr > frame.frame_ptr) {
+                    CallFrame* f = &vm->frames[--vm->frame_ptr];
+                    for (int i = 0; i < LOCALS_PER_FRAME; i++) {
+                        release(vm->locals[f->locals_offset + i]);
+                        vm->locals[f->locals_offset + i] = (Value){VAL_VOID, {0}};
+                    }
+                }
+                vm_push(vm, err);
+                vm->ip = frame.handler_addr;
+                break;
+            }
             case OP_SET_INDEX: {
                 Value index = vm_pop(vm);
                 Value obj = vm_pop(vm);
                 Value val = vm_pop(vm);
-                if (obj.type == VAL_OBJ && obj.as.obj->type == OBJ_ARRAY) {
+                if (TYPE_KIND(obj.type) == VAL_OBJ && obj.as.obj->type == OBJ_ARRAY) {
                     ObjArray* array = (ObjArray*)obj.as.obj;
                     int idx = (int)index.as.i_val;
-                    if (idx < 0 || idx >= array->count) { fprintf(stderr, "Array index out of bounds\n"); exit(1); }
+                    if (idx < 0 || idx >= array->count) {
+                        fprintf(stderr, "Runtime Error: Array index %d out of bounds in assignment (length %d)\n", idx, array->count);
+                        exit(1);
+                    }
                     release(array->items[idx]);
                     retain(val);
                     array->items[idx] = val;
-                } else if (obj.type == VAL_OBJ && obj.as.obj->type == OBJ_MAP) {
+                } else if (TYPE_KIND(obj.type) == VAL_OBJ && obj.as.obj->type == OBJ_MAP) {
                     ObjMap* map = (ObjMap*)obj.as.obj;
                     map_set(map, index, val);
                 } else { fprintf(stderr, "Can only set index on arrays or maps\n"); exit(1); }
@@ -801,12 +1055,13 @@ void vm_run(VM* vm) {
                 break;
             }
             case OP_ARRAY: {
+                Type type = (Type)read_int32(vm);
                 int count = vm->code[vm->ip++];
                 ObjArray* array = allocate_array(vm);
                 array->items = malloc(sizeof(Value) * count);
                 array->count = count; array->capacity = count;
                 for (int i = count - 1; i >= 0; i--) array->items[i] = vm_pop(vm);
-                vm_push(vm, (Value){VAL_OBJ, {.obj = (HeapObject*)array}});
+                vm_push(vm, (Value){type, {.obj = (HeapObject*)array}});
                 break;
             }
             case OP_STRUCT: {
@@ -824,6 +1079,7 @@ void vm_run(VM* vm) {
                 break;
             }
             case OP_MAP: {
+                Type type = (Type)read_int32(vm);
                 int pair_count = vm->code[vm->ip++];
                 ObjMap* map = allocate_map(vm);
                 for (int i = 0; i < pair_count; i++) {
@@ -832,13 +1088,13 @@ void vm_run(VM* vm) {
                     map_set(map, key, val);
                     release(key); release(val);
                 }
-                vm_push(vm, (Value){VAL_OBJ, {.obj = (HeapObject*)map}});
+                vm_push(vm, (Value){type, {.obj = (HeapObject*)map}});
                 break;
             }
             case OP_INVOKE: {
                 int arg_count = vm->code[vm->ip++];
                 Value callable = vm_pop(vm);
-                if (callable.type == VAL_OBJ && callable.as.obj->type == OBJ_NATIVE) {
+                if (TYPE_KIND(callable.type) == VAL_OBJ && callable.as.obj->type == OBJ_NATIVE) {
                     ObjNative* native = (ObjNative*)callable.as.obj;
                     Value* args = &vm->stack[vm->stack_ptr - arg_count];
                     Value result = native->function(vm, arg_count, args);
@@ -846,7 +1102,7 @@ void vm_run(VM* vm) {
                     for (int i = 0; i < arg_count; i++) release(vm_pop(vm));
                     vm_push(vm, result);
                     release(result); release(callable);
-                } else if (callable.type >= VAL_FUNC || callable.type == VAL_INT) {
+                } else if (TYPE_KIND(callable.type) >= VAL_FUNC || TYPE_KIND(callable.type) == VAL_INT) {
                     int32_t addr = (int32_t)callable.as.i_val;
                     release(callable);
                     if (vm->frame_ptr >= FRAMES_MAX) { fprintf(stderr, "Stack overflow\n"); exit(1); }
@@ -854,7 +1110,7 @@ void vm_run(VM* vm) {
                     CallFrame* frame = &vm->frames[vm->frame_ptr++];
                     frame->return_addr = vm->ip; frame->locals_offset = current_offset;
                     vm->ip = addr;
-                } else { fprintf(stderr, "Can only invoke functions or natives. Type: %d\n", callable.type); exit(1); }
+                } else { fprintf(stderr, "Can only invoke functions or natives. Type: %d\n", TYPE_KIND(callable.type)); exit(1); }
                 break;
             }
             default:

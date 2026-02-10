@@ -110,8 +110,12 @@ static TokenType identifier_type() {
         case 't': 
             if (lexer.current - lexer.start > 1) {
                 switch (lexer.start[1]) {
-                    case 'r': return check_keyword(2, 1, "u", TOKEN_BOOL);
+                    case 'r': 
+                        if (lexer.current - lexer.start == 3 && lexer.start[2] == 'u') return TOKEN_BOOL;
+                        if (lexer.current - lexer.start == 3 && lexer.start[2] == 'y') return TOKEN_TRY;
+                        break;
                     case 'y': return check_keyword(2, 2, "pe", TOKEN_TYPE);
+                    case 'h': return check_keyword(2, 3, "row", TOKEN_THROW);
                 }
             }
             break;
@@ -119,6 +123,8 @@ static TokenType identifier_type() {
         case 's': return check_keyword(1, 5, "truct", TOKEN_STRUCT);
         case 'p': return check_keyword(1, 2, "ub", TOKEN_PUB);
         case 'i': return check_keyword(1, 2, "mp", TOKEN_IMP);
+        case 'c': return check_keyword(1, 4, "atch", TOKEN_CATCH);
+        case 'e': return check_keyword(1, 2, "rr", TOKEN_ID); // We will handle 'err' in parse_type
     }
     return TOKEN_ID;
 }

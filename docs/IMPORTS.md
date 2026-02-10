@@ -51,6 +51,22 @@ Imported items are accessed using the dot operator with the alias as a prefix.
 ### Accessing a Struct
 `math.Point(1, 2) => p: math.Point`
 
+## Standard Library Imports
+
+Opo includes a standard library that can be imported using the `std/` prefix. These modules are automatically resolved to the language's installation directory.
+
+Example:
+```
+"std/math" => math: imp
+"std/string" => str_utils: imp
+
+<> -> void: main [
+    math.abs(-10) !!
+]
+```
+
+When an import path starts with `std/`, the compiler searches for the module in the `lib/std/` directory relative to the Opo executable. You can omit the `.opo` extension for standard library imports.
+
 ## Rules and Behavior
 
 1. **Namespacing**: All imported items must be prefixed with the module's alias.

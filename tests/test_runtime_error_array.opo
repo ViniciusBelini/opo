@@ -1,0 +1,4 @@
+<> -> void: main [
+    [1, 2] => a: []int
+    a.5 !! # Should give runtime error
+]

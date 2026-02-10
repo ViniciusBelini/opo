@@ -7,7 +7,7 @@ TARGET = opo
 all: $(TARGET)
 
 $(TARGET): $(OBJ)
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -o $@ $^ -lm
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@

@@ -1,0 +1,51 @@
+# Opo Package Manager (opm)
+
+<args: []str> -> void: help [
+    "Opo Package Manager (opm) v0.1" !!
+    "Usage: opo opm.opo [command] [args]" !!
+    "" !!
+    "Commands:" !!
+    "  install [url]    - Download and install a .opo file" !!
+    "  list             - List .opo files in current directory" !!
+    "  version          - Show version" !!
+]
+
+<url: str> -> void: install [
+    "Downloading " + url + "..." !!
+    system("curl -s -O " + url) => res: int
+    res == 0 ? [
+        "Package installed successfully." !!
+    ] : [
+        "Failed to download package. Exit code: " + str(res) !!
+    ]
+]
+
+<> -> void: main [
+    args() => a: []str
+    # Skip interpreter and script name
+    2 => offset: int
+    
+    len(a) <= offset ? [
+        help(a)
+    ] : [
+        a.offset == "install" ? [
+            len(a) <= offset + 1 ? [
+                "Error: Missing URL" !!
+                help(a)
+            ] : [
+                install(a.(offset + 1))
+            ]
+        ] : [
+            a.offset == "list" ? [
+                "Installed packages (current dir):" !!
+                system("ls *.opo") !!
+            ] : [
+                a.offset == "version" ? [
+                    "opm v0.1" !!
+                ] : [
+                    help(a)
+                ]
+            ]
+        ]
+    ]
+]

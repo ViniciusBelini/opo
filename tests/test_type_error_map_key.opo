@@ -1,0 +1,4 @@
+<> -> void: main [
+    { "a" => 1 } => m: {str:int}
+    2 => m.0 # Error: key should be str
+]

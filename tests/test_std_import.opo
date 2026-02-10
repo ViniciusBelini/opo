@@ -1,0 +1,5 @@
+"std/math" => math: imp
+
+<> -> void: main [
+    math.max(10, 20) !!
+]

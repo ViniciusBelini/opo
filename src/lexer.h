@@ -30,6 +30,7 @@ typedef enum {
     TOKEN_DOT,
     TOKEN_STRUCT, TOKEN_TYPE,
     TOKEN_PUB, TOKEN_IMP,
+    TOKEN_TRY, TOKEN_CATCH, TOKEN_THROW,
     TOKEN_EOF,
     TOKEN_ERROR
 } TokenType;

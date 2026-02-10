@@ -1,0 +1,6 @@
+<> -> void: main [
+    { "a" => 1 } => m: {str:int}
+    has(m, "a") !!
+    has(m, "b") !!
+    m."b" !! # Should give runtime error
+]

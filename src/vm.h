@@ -4,7 +4,7 @@
 #include "common.h"
 
 #define STACK_MAX 256
-#define LOCALS_PER_FRAME 16
+#define LOCALS_PER_FRAME 32
 #define FRAMES_MAX 64
 #define LOCALS_MAX (FRAMES_MAX * LOCALS_PER_FRAME)
 
@@ -12,6 +12,14 @@ typedef struct {
     int return_addr;
     int locals_offset;
 } CallFrame;
+
+typedef struct {
+    int handler_addr;
+    int stack_ptr;
+    int frame_ptr;
+} TryFrame;
+
+#define TRY_STACK_MAX 16
 
 struct VM {
     uint8_t* code;
@@ -22,6 +30,8 @@ struct VM {
     int locals_ptr;
     CallFrame frames[FRAMES_MAX];
     int frame_ptr;
+    TryFrame try_stack[TRY_STACK_MAX];
+    int try_ptr;
     char** strings;
     int strings_count;
     int argc;

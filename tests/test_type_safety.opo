@@ -1,0 +1,16 @@
+<> -> void: main [
+    [1, 2, 3] => a: []int
+    # append(a, "hi") # Should be a compile error
+    
+    # "hi" => a.0 # Should be a compile error
+    
+    { "a" => 1 } => m: {str:int}
+    # "hi" => m."b" # Should be a compile error
+    # 2 => m.0 # Should be a compile error
+    
+    [1, 2] => nums: []int
+    nums.0 => x: int
+    # nums.0 => y: str # Should be a compile error
+    
+    "All basic type safety tests passed at compile time!" !!
+]

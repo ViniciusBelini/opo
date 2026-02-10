@@ -14,7 +14,7 @@ typedef struct {
     int strings_capacity;
 } Chunk;
 
-Chunk* compiler_compile(const char* source, const char* base_dir);
+Chunk* compiler_compile(const char* source, const char* base_dir, const char* stdlib_dir);
 void chunk_free(Chunk* chunk);
 
 #endif

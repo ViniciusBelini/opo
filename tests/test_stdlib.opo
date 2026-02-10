@@ -1,0 +1,29 @@
+"std/math" => math: imp
+"std/string" => string: imp
+"std/array" => array: imp
+"std/test" => test: imp
+
+<> -> void: main [
+    # Math tests
+    test.assert_eq_int(math.max(10, 20), 20, "math.max")
+    test.assert_eq_int(math.min(10, 20), 10, "math.min")
+    test.assert_eq_int(math.abs(-5), 5, "math.abs")
+    test.assert_eq_int(math.pow(2, 3), 8, "math.pow")
+    test.assert_eq_int(math.factorial(5), 120, "math.factorial")
+    
+    # String tests
+    test.assert_eq_str(string.trim("  hello  "), "hello", "string.trim")
+    test.assert(string.contains("hello world", "world"), "string.contains")
+    test.assert(!string.contains("hello world", "opo"), "string.contains false")
+    
+    ["a", "b", "c"] => parts: []str
+    test.assert_eq_str(string.join(parts, ","), "a,b,c", "string.join")
+    
+    # Array tests
+    [1, 2, 3, 4, 5] => nums: []int
+    test.assert(array.contains_int(nums, 3), "array.contains_int")
+    test.assert_eq_int(array.sum(nums), 15, "array.sum")
+    test.assert_eq_int(array.max(nums), 5, "array.max")
+    
+    "All tests passed!" !!
+]

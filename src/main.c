@@ -31,10 +31,57 @@ char* read_file(const char* path) {
     return buffer;
 }
 
+void run_repl(const char* stdlib_dir) {
+    printf("Opo REPL v0.1\n");
+    printf("Type 'exit' to quit.\n");
+    char line[1024];
+    while (true) {
+        printf("opo> ");
+        if (!fgets(line, sizeof(line), stdin)) break;
+        if (strcmp(line, "exit\n") == 0) break;
+        
+        if (strlen(line) <= 1) continue;
+
+        char source[2048];
+        if (strstr(line, "->") != NULL || strstr(line, "struct") != NULL || (strstr(line, "=>") != NULL && strstr(line, "imp") != NULL)) {
+             // If it looks like a function/struct/import, don't wrap it in main but add a main to call it? 
+             // This is tricky. Let's just wrap everything in main for now if it's an expression.
+             sprintf(source, "<> -> void: main [ %s ]", line);
+        } else {
+             // Expression: wrap and print
+             sprintf(source, "<> -> void: main [ (%s) !! ]", line);
+        }
+        
+        Chunk* chunk = compiler_compile(source, ".", stdlib_dir);
+        if (chunk != NULL) {
+            VM vm;
+            char* dummy_argv[] = {"opo"};
+            vm_init(&vm, chunk->code, chunk->strings, chunk->strings_count, 1, dummy_argv);
+            vm_run(&vm);
+            // We don't free chunk immediately because VM might have references? 
+            // No, Opo VM copies code and strings references are handled by retain/release?
+            // Wait, vm_init takes chunk->code and chunk->strings.
+            // vm_run uses them.
+            // After vm_run, we can free chunk.
+            chunk_free(chunk);
+        }
+    }
+}
+
 int main(int argc, char* argv[]) {
-    if (argc != 2) {
-        fprintf(stderr, "Usage: opo [path]\n");
-        exit(64);
+    // Determine stdlib directory (relative to the executable)
+    char stdlib_dir[2048] = "./lib";
+    char exe_path[2048];
+    strcpy(exe_path, argv[0]);
+    char* last_exe_slash = strrchr(exe_path, '/');
+    if (last_exe_slash != NULL) {
+        *last_exe_slash = '\0';
+        snprintf(stdlib_dir, sizeof(stdlib_dir), "%s/lib", exe_path);
+    }
+
+    if (argc < 2) {
+        run_repl(stdlib_dir);
+        return 0;
     }
 
     char* source = read_file(argv[1]);
@@ -47,7 +94,7 @@ int main(int argc, char* argv[]) {
         base_dir[len] = '\0';
     }
 
-    Chunk* chunk = compiler_compile(source, base_dir);
+    Chunk* chunk = compiler_compile(source, base_dir, stdlib_dir);
     free(source);
 
     if (chunk == NULL) return 65;

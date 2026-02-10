@@ -1,0 +1,31 @@
+"std/math" => math: imp
+"std/string" => string: imp
+"std/array" => array: imp
+"std/datetime" => dt: imp
+"std/test" => test: imp
+
+<> -> void: main [
+    # Math improvements
+    math.PI() !!
+    math.sqrt_f(16.0) !!
+    
+    # String improvements
+    string.to_upper("opo is cool") !!
+    string.to_lower("OPO IS COOL") !!
+    
+    # Array improvements
+    [1, 2, 3] => a: []int
+    array.reverse_int(a) !!
+    
+    # Datetime
+    "Now: " + dt.format(dt.now()) !!
+    
+    # Try/Catch
+    try [
+        throw error("Oops")
+    ] catch e [
+        "Caught in test: " + str(e) !!
+    ]
+    
+    "Success!" !!
+]

@@ -1,0 +1,13 @@
+<> -> void: main [
+    clock() !!
+    ascii("A") !!
+    char(66) !!
+    
+    { "a" => 1, "b" => 2 } => m: {str:int}
+    keys(m) !!
+    delete(m, "a")
+    keys(m) !!
+    
+    # We won't test exit() or system() here to not break the test run, 
+    # but they are registered.
+]

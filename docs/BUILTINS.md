@@ -64,3 +64,58 @@ Returns an array of command-line arguments.
 Appends a value to an array.
 - Input: `[]type`, `type`
 - Output: `[]type`
+
+## Advanced System Functions
+
+### `exit(code)`
+Terminates the program with the given exit code.
+- Input: `int`
+- Output: `void`
+
+### `clock()`
+Returns the CPU time used by the program since it started, in seconds.
+- Output: `flt`
+
+### `system(cmd)`
+Executes a system command.
+- Input: `str`
+- Output: `int` (exit code of the command)
+
+### `keys(map)`
+Returns an array containing all keys in a map.
+- Input: `{K:V}`
+- Output: `[]K`
+
+### `delete(map, key)`
+Removes a key and its associated value from a map.
+- Input: `{K:V}`, `K`
+- Output: `void`
+
+### `has(map, key)`
+Checks if a key exists in a map.
+- Input: `{K:V}`, `K`
+- Output: `bol`
+
+### `ascii(char)`
+Returns the ASCII integer value of the first character of a string.
+- Input: `str`
+- Output: `int`
+
+### `char(code)`
+Returns a string consisting of a single character with the given ASCII code.
+- Input: `int`
+- Output: `str`
+
+### `error(message)`
+Creates an error value with the given message.
+- Input: any
+- Output: `err`
+
+### `time()`
+Returns the current Unix timestamp.
+- Output: `int`
+
+### `sqrt(val)`, `sin(val)`, `cos(val)`, `tan(val)`, `log(val)`
+Mathematical functions.
+- Input: `int` or `flt`
+- Output: `flt`

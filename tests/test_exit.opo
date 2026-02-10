@@ -1,0 +1,5 @@
+<> -> void: main [
+    system("echo Hello from Opo System Call") !!
+    exit(0)
+    "This should not print" !!
+]

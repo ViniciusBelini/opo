@@ -1,0 +1,92 @@
+pub <s: str, start: int, end: int> -> str: slice [
+    "" => res: str
+    start => i: int
+    (i < end && i < len(s)) @ [
+        res + s.i => res
+        i + 1 => i
+    ]
+    res
+]
+
+pub <c: str> -> bol: is_whitespace [
+    ascii(c) => a: int
+    a == 32 || a == 9 || a == 10 || a == 13
+]
+
+pub <s: str> -> str: trim_left [
+    0 => i: int
+    (i < len(s) && is_whitespace(s.i)) @ [
+        i + 1 => i
+    ]
+    slice(s, i, len(s))
+]
+
+pub <s: str> -> str: trim_right [
+    len(s) => i: int
+    (i > 0 && is_whitespace(s.(i - 1))) @ [
+        i - 1 => i
+    ]
+    slice(s, 0, i)
+]
+
+pub <s: str> -> str: trim [
+    trim_left(trim_right(s))
+]
+
+pub <s: str, sub: str> -> bol: contains [
+    len(sub) == 0 ? [ tru ] : [
+        0 => i: int
+        fls => found: bol
+        (i <= len(s) - len(sub) && !found) @ [
+            slice(s, i, i + len(sub)) == sub ? [
+                tru => found
+            ] : [
+                i + 1 => i
+            ]
+        ]
+        found
+    ]
+]
+
+pub <parts: []str, sep: str> -> str: join [
+    "" => res: str
+    0 => i: int
+    (i < len(parts)) @ [
+        res + parts.i => res
+        i < len(parts) - 1 ? [
+            res + sep => res
+        ] : []
+        i + 1 => i
+    ]
+    res
+]
+
+pub <s: str> -> str: to_upper [
+    "" => res: str
+    0 => j: int
+    (j < len(s)) @ [
+        ascii(s.j) => a: int
+        (a >= 97 && a <= 122) ? [
+            res + char(a - 32) => res
+        ] : [
+            res + s.j => res
+        ]
+        j + 1 => j
+    ]
+    res
+]
+
+pub <s: str> -> str: to_lower [
+    "" => res: str
+    0 => k: int
+    (k < len(s)) @ [
+        ascii(s.k) => a: int
+        (a >= 65 && a <= 90) ? [
+            res + char(a + 32) => res
+        ] : [
+            res + s.k => res
+        ]
+        k + 1 => k
+    ]
+    res
+]
