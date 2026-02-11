@@ -3,10 +3,12 @@
 #include <string.h>
 #include <time.h>
 #include <math.h>
+#include <stdarg.h>
 #include "vm.h"
 
 void retain(Value val) {
-    if (TYPE_KIND(val.type) == VAL_OBJ && val.as.obj != NULL) {
+    int kind = TYPE_KIND(val.type);
+    if ((kind == VAL_OBJ || kind == VAL_MAP || kind == VAL_ENUM) && val.as.obj != NULL) {
         val.as.obj->ref_count++;
     }
 }
@@ -57,11 +59,20 @@ static void free_object(HeapObject* obj) {
             free(map);
             break;
         }
+        case OBJ_ENUM: {
+            ObjEnum* en = (ObjEnum*)obj;
+            free(en->enum_name);
+            free(en->variant_name);
+            if (en->has_payload) release(en->payload);
+            free(en);
+            break;
+        }
     }
 }
 
 void release(Value val) {
-    if (TYPE_KIND(val.type) == VAL_OBJ && val.as.obj != NULL) {
+    int kind = TYPE_KIND(val.type);
+    if ((kind == VAL_OBJ || kind == VAL_MAP || kind == VAL_ENUM) && val.as.obj != NULL) {
         val.as.obj->ref_count--;
         if (val.as.obj->ref_count <= 0) {
             free_object(val.as.obj);
@@ -273,6 +284,25 @@ static Value native_str(VM* vm, int arg_count, Value* args) {
         Value s = native_str(vm, 1, &inner);
         sprintf(buf, "Error: %s", ((ObjString*)s.as.obj)->chars);
         release(s);
+    }
+    else if (TYPE_KIND(val.type) == VAL_ENUM) {
+        ObjEnum* en = (ObjEnum*)val.as.obj;
+        if (TYPE_SUB(val.type) == OPTION_ENUM_ID) {
+            if (en->variant_index == 0) strcpy(buf, "none");
+            else {
+                Value s = native_str(vm, 1, &en->payload);
+                sprintf(buf, "some(%s)", ((ObjString*)s.as.obj)->chars);
+                release(s);
+            }
+        } else {
+            if (en->has_payload) {
+                Value s = native_str(vm, 1, &en->payload);
+                sprintf(buf, "enum.variant(%s)", ((ObjString*)s.as.obj)->chars);
+                release(s);
+            } else {
+                sprintf(buf, "enum.variant");
+            }
+        }
     }
     else sprintf(buf, "<obj>");
     
@@ -503,6 +533,15 @@ static char* type_to_string(Type t, char* buf) {
         case VAL_FUNC_VOID:
             strcpy(buf, "fun");
             break;
+        case VAL_ENUM: {
+            if (sub == OPTION_ENUM_ID) {
+                char key_buf[64];
+                sprintf(buf, "%s?", type_to_string(key, key_buf));
+            } else {
+                strcpy(buf, "enum");
+            }
+            break;
+        }
         default: strcpy(buf, "unknown"); break;
     }
     return buf;
@@ -632,6 +671,36 @@ Value vm_pop(VM* vm) {
         exit(1);
     }
     return vm->stack[--vm->stack_ptr];
+}
+
+static void runtime_error(VM* vm, const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    char buf[1024];
+    vsnprintf(buf, sizeof(buf), format, args);
+    va_end(args);
+
+    Value err_msg = (Value){VAL_OBJ, {.obj = (HeapObject*)allocate_string(vm, buf, (int)strlen(buf))}};
+    retain(err_msg);
+    
+    if (vm->try_ptr > 0) {
+        TryFrame frame = vm->try_stack[--vm->try_ptr];
+        while (vm->stack_ptr > frame.stack_ptr) release(vm_pop(vm));
+        while (vm->frame_ptr > frame.frame_ptr) {
+            CallFrame* f = &vm->frames[--vm->frame_ptr];
+            for (int i = 0; i < LOCALS_PER_FRAME; i++) {
+                release(vm->locals[f->locals_offset + i]);
+                vm->locals[f->locals_offset + i] = (Value){VAL_VOID, {.i_val = 0}};
+            }
+        }
+        vm_push(vm, err_msg);
+        vm->ip = frame.handler_addr;
+        release(err_msg);
+    } else {
+        fprintf(stderr, "Runtime Error: %s\n", buf);
+        release(err_msg);
+        exit(1);
+    }
 }
 
 static int32_t read_int32(VM* vm) {
@@ -831,14 +900,23 @@ void vm_run(VM* vm) {
                 Value b = vm_pop(vm);
                 Value a = vm_pop(vm);
                 if (TYPE_KIND(a.type) == VAL_INT && TYPE_KIND(b.type) == VAL_INT) {
-                    if (b.as.i_val == 0) { fprintf(stderr, "Division by zero\n"); exit(1); }
+                    if (b.as.i_val == 0) {
+                        release(a); release(b);
+                        runtime_error(vm, "Division by zero");
+                        break;
+                    }
                     vm_push(vm, (Value){VAL_INT, {.i_val = a.as.i_val / b.as.i_val}});
                 } else if (TYPE_KIND(a.type) == VAL_FLT && TYPE_KIND(b.type) == VAL_FLT) {
-                    if (b.as.f_val == 0) { fprintf(stderr, "Division by zero\n"); exit(1); }
+                    if (b.as.f_val == 0) {
+                        release(a); release(b);
+                        runtime_error(vm, "Division by zero");
+                        break;
+                    }
                     vm_push(vm, (Value){VAL_FLT, {.f_val = a.as.f_val / b.as.f_val}});
                 } else {
-                    fprintf(stderr, "Type error in DIV\n");
-                    exit(1);
+                    release(a); release(b);
+                    runtime_error(vm, "Type error in DIV");
+                    break;
                 }
                 release(a); release(b);
                 break;
@@ -914,7 +992,7 @@ void vm_run(VM* vm) {
             }
             case OP_CALL: {
                 int32_t addr = read_int32(vm);
-                if (vm->frame_ptr >= FRAMES_MAX) { fprintf(stderr, "Stack overflow (frames)\n"); exit(1); }
+                if (vm->frame_ptr >= FRAMES_MAX) { runtime_error(vm, "Stack overflow (frames)\n"); }
                 int current_offset = vm->frame_ptr * LOCALS_PER_FRAME;
                 CallFrame* frame = &vm->frames[vm->frame_ptr++];
                 frame->return_addr = vm->ip;
@@ -923,7 +1001,7 @@ void vm_run(VM* vm) {
                 break;
             }
             case OP_RET: {
-                if (vm->frame_ptr <= 1) { fprintf(stderr, "Stack underflow (frames)\n"); exit(1); }
+                if (vm->frame_ptr <= 1) { runtime_error(vm, "Stack underflow (frames)\n"); }
                 CallFrame* frame = &vm->frames[--vm->frame_ptr];
                 for (int i = 0; i < LOCALS_PER_FRAME; i++) {
                     release(vm->locals[frame->locals_offset + i]);
@@ -954,16 +1032,18 @@ void vm_run(VM* vm) {
                     ObjArray* array = (ObjArray*)obj.as.obj;
                     int idx = (int)index.as.i_val;
                     if (idx < 0 || idx >= array->count) {
-                        fprintf(stderr, "Runtime Error: Array index %d out of bounds (length %d)\n", idx, array->count);
-                        exit(1);
+                        release(obj); release(index);
+                        runtime_error(vm, "Array index %d out of bounds (length %d)", idx, array->count);
+                        break;
                     }
                     vm_push(vm, array->items[idx]);
                 } else if (TYPE_KIND(obj.type) == VAL_OBJ && obj.as.obj->type == OBJ_STRING) {
                     ObjString* s = (ObjString*)obj.as.obj;
                     int idx = (int)index.as.i_val;
                     if (idx < 0 || idx >= s->length) {
-                        fprintf(stderr, "Runtime Error: String index %d out of bounds (length %d)\n", idx, s->length);
-                        exit(1);
+                        release(obj); release(index);
+                        runtime_error(vm, "String index %d out of bounds (length %d)", idx, s->length);
+                        break;
                     }
                     char buf[2] = {s->chars[idx], '\0'};
                     ObjString* res = allocate_string(vm, buf, 1);
@@ -972,18 +1052,27 @@ void vm_run(VM* vm) {
                     ObjMap* map = (ObjMap*)obj.as.obj;
                     Value val = map_get(map, index);
                     if (TYPE_KIND(val.type) == VAL_VOID) {
-                        fprintf(stderr, "Runtime Error: Key not found in map.\n");
-                        exit(1);
+                        release(obj); release(index);
+                        runtime_error(vm, "Key not found in map");
+                        break;
                     }
                     vm_push(vm, val);
-                } else { fprintf(stderr, "Runtime Error: Can only index arrays, strings or maps. Got type kind %d\n", TYPE_KIND(obj.type)); exit(1); }
+                } else { 
+                    release(obj); release(index);
+                    runtime_error(vm, "Can only index arrays, strings or maps. Got type kind %d", TYPE_KIND(obj.type));
+                    break;
+                }
                 release(obj); release(index);
                 break;
             }
             case OP_GET_MEMBER: {
                 int field_idx = vm->code[vm->ip++];
                 Value obj = vm_pop(vm);
-                if (TYPE_KIND(obj.type) != VAL_OBJ || obj.as.obj->type != OBJ_STRUCT) { fprintf(stderr, "Can only get member\n"); exit(1); }
+                if (TYPE_KIND(obj.type) != VAL_OBJ || obj.as.obj->type != OBJ_STRUCT) {
+                    release(obj);
+                    runtime_error(vm, "Can only get member");
+                    break;
+                }
                 ObjStruct* st = (ObjStruct*)obj.as.obj;
                 vm_push(vm, st->values[field_idx]);
                 release(obj);
@@ -993,7 +1082,11 @@ void vm_run(VM* vm) {
                 int field_idx = vm->code[vm->ip++];
                 Value obj = vm_pop(vm);
                 Value val = vm_pop(vm);
-                if (TYPE_KIND(obj.type) != VAL_OBJ || obj.as.obj->type != OBJ_STRUCT) { fprintf(stderr, "Can only set member\n"); exit(1); }
+                if (TYPE_KIND(obj.type) != VAL_OBJ || obj.as.obj->type != OBJ_STRUCT) {
+                    release(obj); release(val);
+                    runtime_error(vm, "Can only set member");
+                    break;
+                }
                 ObjStruct* st = (ObjStruct*)obj.as.obj;
                 release(st->values[field_idx]);
                 retain(val);
@@ -1003,7 +1096,7 @@ void vm_run(VM* vm) {
             }
             case OP_TRY: {
                 int32_t handler = read_int32(vm);
-                if (vm->try_ptr >= TRY_STACK_MAX) { fprintf(stderr, "Try stack overflow\n"); exit(1); }
+                if (vm->try_ptr >= TRY_STACK_MAX) { runtime_error(vm, "Try stack overflow\n"); }
                 vm->try_stack[vm->try_ptr++] = (TryFrame){handler, vm->stack_ptr, vm->frame_ptr};
                 break;
             }
@@ -1041,8 +1134,9 @@ void vm_run(VM* vm) {
                     ObjArray* array = (ObjArray*)obj.as.obj;
                     int idx = (int)index.as.i_val;
                     if (idx < 0 || idx >= array->count) {
-                        fprintf(stderr, "Runtime Error: Array index %d out of bounds in assignment (length %d)\n", idx, array->count);
-                        exit(1);
+                        release(obj); release(index); release(val);
+                        runtime_error(vm, "Array index %d out of bounds in assignment (length %d)", idx, array->count);
+                        break;
                     }
                     release(array->items[idx]);
                     retain(val);
@@ -1050,7 +1144,11 @@ void vm_run(VM* vm) {
                 } else if (TYPE_KIND(obj.type) == VAL_OBJ && obj.as.obj->type == OBJ_MAP) {
                     ObjMap* map = (ObjMap*)obj.as.obj;
                     map_set(map, index, val);
-                } else { fprintf(stderr, "Can only set index on arrays or maps\n"); exit(1); }
+                } else { 
+                    release(obj); release(index); release(val);
+                    runtime_error(vm, "Can only set index on arrays or maps");
+                    break;
+                }
                 release(obj); release(index); release(val);
                 break;
             }
@@ -1091,6 +1189,76 @@ void vm_run(VM* vm) {
                 vm_push(vm, (Value){type, {.obj = (HeapObject*)map}});
                 break;
             }
+            case OP_ENUM_VARIANT: {
+                Type type = (Type)read_int32(vm);
+                int variant_id = vm->code[vm->ip++];
+                bool has_payload = vm->code[vm->ip++] != 0;
+                ObjEnum* en = malloc(sizeof(ObjEnum));
+                en->obj.type = OBJ_ENUM;
+                en->obj.ref_count = 0;
+                en->variant_index = variant_id;
+                en->has_payload = has_payload;
+                if (has_payload) {
+                    en->payload = vm_pop(vm);
+                } else {
+                    en->payload = (Value){VAL_VOID, {.i_val = 0}};
+                }
+                en->enum_name = strdup("enum");
+                en->variant_name = strdup("variant");
+                vm_push(vm, (Value){type, {.obj = (HeapObject*)en}});
+                break;
+            }
+            case OP_CHECK_VARIANT: {
+                int32_t variant_id = read_int32(vm);
+                Value val = vm->stack[vm->stack_ptr - 1];
+                if (TYPE_KIND(val.type) == VAL_ENUM && val.as.obj->type == OBJ_ENUM) {
+                    ObjEnum* en = (ObjEnum*)val.as.obj;
+                    vm_push(vm, (Value){VAL_BOOL, {.b_val = en->variant_index == variant_id}});
+                } else {
+                    vm_push(vm, (Value){VAL_BOOL, {.b_val = false}});
+                }
+                break;
+            }
+            case OP_IS_TRUTHY: {
+                Value val = vm_pop(vm);
+                bool truthy = false;
+                int kind = TYPE_KIND(val.type);
+                if (kind == VAL_BOOL) truthy = val.as.b_val;
+                else if (kind == VAL_ENUM) {
+                    if (val.as.obj->type == OBJ_ENUM) {
+                        ObjEnum* en = (ObjEnum*)val.as.obj;
+                        truthy = (en->variant_index != 0); // 0 is none for Option, or first variant for other enums. 
+                        // For Options, some is 1, none is 0.
+                    }
+                } else if (kind != VAL_VOID) truthy = true;
+                
+                vm_push(vm, (Value){VAL_BOOL, {.b_val = truthy}});
+                release(val);
+                break;
+            }
+            case OP_EXTRACT_ENUM_PAYLOAD: {
+                Value val = vm_pop(vm);
+                if (TYPE_KIND(val.type) == VAL_ENUM && val.as.obj->type == OBJ_ENUM) {
+                    ObjEnum* en = (ObjEnum*)val.as.obj;
+                    retain(en->payload);
+                    vm_push(vm, en->payload);
+                } else {
+                    vm_push(vm, (Value){VAL_VOID, {.i_val = 0}});
+                }
+                release(val);
+                break;
+            }
+            case OP_GET_ENUM_PAYLOAD: {
+                Value val = vm->stack[vm->stack_ptr - 1];
+                if (TYPE_KIND(val.type) == VAL_ENUM && val.as.obj->type == OBJ_ENUM) {
+                    ObjEnum* en = (ObjEnum*)val.as.obj;
+                    retain(en->payload);
+                    vm_push(vm, en->payload);
+                } else {
+                    vm_push(vm, (Value){VAL_VOID, {.i_val = 0}});
+                }
+                break;
+            }
             case OP_INVOKE: {
                 int arg_count = vm->code[vm->ip++];
                 Value callable = vm_pop(vm);
@@ -1105,7 +1273,7 @@ void vm_run(VM* vm) {
                 } else if (TYPE_KIND(callable.type) >= VAL_FUNC || TYPE_KIND(callable.type) == VAL_INT) {
                     int32_t addr = (int32_t)callable.as.i_val;
                     release(callable);
-                    if (vm->frame_ptr >= FRAMES_MAX) { fprintf(stderr, "Stack overflow\n"); exit(1); }
+                    if (vm->frame_ptr >= FRAMES_MAX) { runtime_error(vm, "Stack overflow\n"); }
                     int current_offset = vm->frame_ptr * LOCALS_PER_FRAME;
                     CallFrame* frame = &vm->frames[vm->frame_ptr++];
                     frame->return_addr = vm->ip; frame->locals_offset = current_offset;

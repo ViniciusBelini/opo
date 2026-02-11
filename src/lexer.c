@@ -120,11 +120,20 @@ static TokenType identifier_type() {
             }
             break;
         case 'f': return check_keyword(1, 2, "ls", TOKEN_BOOL);
-        case 's': return check_keyword(1, 5, "truct", TOKEN_STRUCT);
+        case 's': 
+            if (lexer.current - lexer.start > 1) {
+                switch (lexer.start[1]) {
+                    case 't': return check_keyword(2, 4, "ruct", TOKEN_STRUCT);
+                    case 'o': return check_keyword(2, 2, "me", TOKEN_SOME);
+                }
+            }
+            break;
         case 'p': return check_keyword(1, 2, "ub", TOKEN_PUB);
         case 'i': return check_keyword(1, 2, "mp", TOKEN_IMP);
         case 'c': return check_keyword(1, 4, "atch", TOKEN_CATCH);
-        case 'e': return check_keyword(1, 2, "rr", TOKEN_ID); // We will handle 'err' in parse_type
+        case 'e': return check_keyword(1, 3, "num", TOKEN_ENUM);
+        case 'm': return check_keyword(1, 4, "atch", TOKEN_MATCH);
+        case 'n': return check_keyword(1, 3, "one", TOKEN_NONE);
     }
     return TOKEN_ID;
 }

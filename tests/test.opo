@@ -1,8 +1,17 @@
-<> -> void: main [
-    try[
-        2 + "2" !!
-        throw "ops"
-    ]catch e[
-        "Error: "+e !!
+<name: str> -> int?: getAge[
+    name == "Vinícius" ? [
+        some(20)
+    ] : [
+        none
+    ]
+]
+
+<> -> void: main[
+    getAge("Vinícius") => age: int?
+
+    age ? [
+        "Vinícius' age:  "+str(age.some) !!
+    ] : [
+        "Vinícius' age: unkown" !!
     ]
 ]

@@ -40,6 +40,15 @@ typedef struct {
 
 typedef struct {
     Token name;
+    Token variants[16];
+    Type payload_types[16];
+    bool has_payload[16];
+    int variant_count;
+    bool is_public;
+} EnumDef;
+
+typedef struct {
+    Token name;
     int index;
     Type return_type;
     Type param_types[8];
@@ -53,6 +62,8 @@ typedef struct {
     int function_count;
     StructDef structs[64];
     int struct_count;
+    EnumDef enums[64];
+    int enum_count;
     Native natives[64];
     int native_count;
     int scope_depth;
@@ -113,6 +124,12 @@ static void emit_bytes(uint8_t b1, uint8_t b2) {
 static void patch_int32(int offset, int32_t value) {
     for (int i = 0; i < 4; i++) {
         current_chunk->code[offset + i] = (value >> (i * 8)) & 0xFF;
+    }
+}
+
+static void emit_int32(int32_t value) {
+    for (int i = 0; i < 4; i++) {
+        emit_byte((value >> (i * 8)) & 0xFF);
     }
 }
 
@@ -236,6 +253,15 @@ static bool is_assignable(Type expected, Type actual) {
         }
     }
 
+    // Enum/Option compatibility
+    if (TYPE_KIND(expected) == VAL_ENUM && TYPE_KIND(actual) == VAL_ENUM) {
+        if (TYPE_SUB(expected) == OPTION_ENUM_ID && TYPE_SUB(actual) == OPTION_ENUM_ID) {
+            if (TYPE_KEY(expected) == VAL_ANY || TYPE_KEY(actual) == VAL_ANY) return true;
+            return TYPE_KEY(expected) == TYPE_KEY(actual);
+        }
+        return TYPE_SUB(expected) == TYPE_SUB(actual);
+    }
+
     return false;
 }
 
@@ -282,19 +308,18 @@ static Type type_pop() {
 }
 
 static Type parse_type() {
+    Type type = VAL_VOID;
     if (match(TOKEN_LBRACKET)) {
         consume(TOKEN_RBRACKET, "Expect ']' after '[' for array type.");
         Type element = parse_type();
-        return MAKE_TYPE(VAL_OBJ, TYPE_KIND(element), 0);
-    }
-    if (match(TOKEN_LBRACE)) {
+        type = MAKE_TYPE(VAL_OBJ, TYPE_KIND(element), 0);
+    } else if (match(TOKEN_LBRACE)) {
         Type key = parse_type(); // key type
         consume(TOKEN_COLON, "Expect ':' after key type in map type.");
         Type value = parse_type(); // value type
         consume(TOKEN_RBRACE, "Expect '}' after map type.");
-        return MAKE_TYPE(VAL_MAP, TYPE_KIND(value), TYPE_KIND(key));
-    }
-    if (match(TOKEN_LANGLE)) {
+        type = MAKE_TYPE(VAL_MAP, TYPE_KIND(value), TYPE_KIND(key));
+    } else if (match(TOKEN_LANGLE)) {
         while (parser.current.type != TOKEN_RANGLE && parser.current.type != TOKEN_EOF) {
             parse_type();
             if (parser.current.type == TOKEN_COMMA) advance();
@@ -303,58 +328,99 @@ static Type parse_type() {
         consume(TOKEN_ARROW, "Expect '->' after function type parameters.");
         Type ret = parse_type(); // Return type
         switch (ret) {
-            case VAL_INT: return VAL_FUNC_INT;
-            case VAL_FLT: return VAL_FUNC_FLT;
-            case VAL_BOOL: return VAL_FUNC_BOOL;
-            case VAL_STR: return VAL_FUNC_STR;
-            case VAL_VOID: return VAL_FUNC_VOID;
-            default: return VAL_FUNC;
+            case VAL_INT: type = VAL_FUNC_INT; break;
+            case VAL_FLT: type = VAL_FUNC_FLT; break;
+            case VAL_BOOL: type = VAL_FUNC_BOOL; break;
+            case VAL_STR: type = VAL_FUNC_STR; break;
+            case VAL_VOID: type = VAL_FUNC_VOID; break;
+            default: type = VAL_FUNC; break;
         }
-    }
-
-    Token t = parser.current;
-    advance();
-
-    if (match(TOKEN_DOT)) {
-        Token member = parser.current;
+    } else {
+        Token t = parser.current;
         advance();
-        char full_name[256];
-        memcpy(full_name, t.start, t.length);
-        full_name[t.length] = '.';
-        memcpy(full_name + t.length + 1, member.start, member.length);
-        full_name[t.length + 1 + member.length] = '\0';
-        
-        for (int i = 0; i < current_compiler->struct_count; i++) {
-            if (current_compiler->structs[i].name.length == (int)strlen(full_name) &&
-                memcmp(current_compiler->structs[i].name.start, full_name, strlen(full_name)) == 0) {
-                return VAL_OBJ;
+
+        if (match(TOKEN_DOT)) {
+            Token member = parser.current;
+            advance();
+            char full_name[256];
+            memcpy(full_name, t.start, t.length);
+            full_name[t.length] = '.';
+            memcpy(full_name + t.length + 1, member.start, member.length);
+            full_name[t.length + 1 + member.length] = '\0';
+            
+            bool found = false;
+            for (int i = 0; i < current_compiler->struct_count; i++) {
+                if (current_compiler->structs[i].name.length == (int)strlen(full_name) &&
+                    memcmp(current_compiler->structs[i].name.start, full_name, strlen(full_name)) == 0) {
+                    type = VAL_OBJ;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                for (int i = 0; i < current_compiler->enum_count; i++) {
+                    if (current_compiler->enums[i].name.length == (int)strlen(full_name) &&
+                        memcmp(current_compiler->enums[i].name.start, full_name, strlen(full_name)) == 0) {
+                        type = MAKE_TYPE(VAL_ENUM, i, 0);
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if (!found) {
+                error_at(&member, "Unknown type in namespace.");
+                return VAL_VOID;
+            }
+        } else if (t.type == TOKEN_IMP) type = VAL_IMP;
+        else if (t.type == TOKEN_TYPE) type = VAL_VOID;
+        else if (t.length == 3 && memcmp(t.start, "int", 3) == 0) type = VAL_INT;
+        else if (t.length == 3 && memcmp(t.start, "flt", 3) == 0) type = VAL_FLT;
+        else if (t.length == 3 && memcmp(t.start, "bol", 3) == 0) type = VAL_BOOL;
+        else if (t.length == 3 && memcmp(t.start, "str", 3) == 0) type = VAL_STR;
+        else if (t.length == 3 && memcmp(t.start, "err", 3) == 0) type = VAL_ERR;
+        else if (t.length == 4 && memcmp(t.start, "void", 4) == 0) type = VAL_VOID;
+        else if (t.length == 3 && memcmp(t.start, "fun", 3) == 0) type = VAL_FUNC;
+        else if (t.length == 3 && memcmp(t.start, "any", 3) == 0) type = VAL_ANY;
+        else if (t.length == 6 && memcmp(t.start, "Option", 6) == 0) {
+            if (match(TOKEN_LANGLE)) {
+                Type inner = parse_type();
+                consume(TOKEN_RANGLE, "Expect '>' after Option type parameter.");
+                type = MAKE_TYPE(VAL_ENUM, OPTION_ENUM_ID, TYPE_KIND(inner));
+            } else {
+                type = MAKE_TYPE(VAL_ENUM, OPTION_ENUM_ID, VAL_ANY);
+            }
+        } else {
+            bool found = false;
+            for (int i = 0; i < current_compiler->struct_count; i++) {
+                if (t.length == current_compiler->structs[i].name.length &&
+                    memcmp(t.start, current_compiler->structs[i].name.start, t.length) == 0) {
+                    type = VAL_OBJ;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                for (int i = 0; i < current_compiler->enum_count; i++) {
+                    if (t.length == current_compiler->enums[i].name.length &&
+                        memcmp(t.start, current_compiler->enums[i].name.start, t.length) == 0) {
+                        type = MAKE_TYPE(VAL_ENUM, i, 0);
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if (!found) {
+                error_at(&t, "Unknown type.");
+                return VAL_VOID;
             }
         }
-        error_at(&member, "Unknown type in namespace.");
-        return VAL_VOID;
     }
 
-    if (t.type == TOKEN_IMP) return VAL_IMP;
-    if (t.type == TOKEN_TYPE) return VAL_VOID;
-
-    if (t.length == 3 && memcmp(t.start, "int", 3) == 0) return VAL_INT;
-    if (t.length == 3 && memcmp(t.start, "flt", 3) == 0) return VAL_FLT;
-    if (t.length == 3 && memcmp(t.start, "bol", 3) == 0) return VAL_BOOL;
-    if (t.length == 3 && memcmp(t.start, "str", 3) == 0) return VAL_STR;
-    if (t.length == 3 && memcmp(t.start, "err", 3) == 0) return VAL_ERR;
-    if (t.length == 4 && memcmp(t.start, "void", 4) == 0) return VAL_VOID;
-    if (t.length == 3 && memcmp(t.start, "fun", 3) == 0) return VAL_FUNC;
-    
-    // Check if it's a struct name
-    for (int i = 0; i < current_compiler->struct_count; i++) {
-        if (t.length == current_compiler->structs[i].name.length &&
-            memcmp(t.start, current_compiler->structs[i].name.start, t.length) == 0) {
-            return VAL_OBJ;
-        }
+    while (match(TOKEN_QUESTION)) {
+        type = MAKE_TYPE(VAL_ENUM, OPTION_ENUM_ID, TYPE_KIND(type));
     }
 
-    error_at(&t, "Unknown type.");
-    return VAL_VOID;
+    return type;
 }
 
 typedef enum {
@@ -494,8 +560,7 @@ static void array_literal() {
     consume(TOKEN_RBRACKET, "Expect ']' after array elements.");
     Type full_type = MAKE_TYPE(VAL_OBJ, TYPE_KIND(element_type), 0);
     emit_byte(OP_ARRAY);
-    patch_int32(current_chunk->count, full_type);
-    current_chunk->count += 4;
+    emit_int32(full_type);
     emit_byte((uint8_t)count);
     type_push(full_type);
 }
@@ -524,8 +589,7 @@ static void map_literal() {
     consume(TOKEN_RBRACE, "Expect '}' after map elements.");
     Type full_type = MAKE_TYPE(VAL_MAP, TYPE_KIND(val_type), TYPE_KIND(key_type));
     emit_byte(OP_MAP);
-    patch_int32(current_chunk->count, full_type);
-    current_chunk->count += 4;
+    emit_int32(full_type);
     emit_byte((uint8_t)count);
     type_push(full_type);
 }
@@ -561,7 +625,10 @@ static void dot() {
         if (TYPE_KIND(lhs_type) == VAL_OBJ || TYPE_KIND(lhs_type) == VAL_MAP) type_push(TYPE_SUB(lhs_type));
         else type_push(VAL_ANY);
     } else {
-        consume(TOKEN_ID, "Expect member name after '.'.");
+        if (parser.current.type != TOKEN_ID && parser.current.type != TOKEN_SOME) {
+            error_at(&parser.current, "Expect member name after '.'.");
+        }
+        advance();
         Token name = parser.previous;
         int field_idx = -1;
         int struct_idx = -1;
@@ -580,6 +647,10 @@ static void dot() {
         if (field_idx != -1) {
             emit_bytes(OP_GET_MEMBER, (uint8_t)field_idx);
             type_push(current_compiler->structs[struct_idx].field_types[field_idx]);
+        } else if (TYPE_KIND(lhs_type) == VAL_ENUM && TYPE_SUB(lhs_type) == OPTION_ENUM_ID &&
+                   name.length == 4 && memcmp(name.start, "some", 4) == 0) {
+            emit_byte(OP_EXTRACT_ENUM_PAYLOAD);
+            type_push(MAKE_TYPE(TYPE_KEY(lhs_type), 0, 0));
         } else {
             // Try as a variable for dynamic indexing
             int arg = resolve_local(current_compiler, &name);
@@ -630,6 +701,31 @@ static void literal() {
     }
 }
 
+static void some_expr() {
+    consume(TOKEN_LPAREN, "Expect '(' after 'some'.");
+    expression();
+    Type val_type = type_pop();
+    consume(TOKEN_RPAREN, "Expect ')' after 'some' argument.");
+    
+    Type type = MAKE_TYPE(VAL_ENUM, OPTION_ENUM_ID, TYPE_KIND(val_type));
+    emit_byte(OP_ENUM_VARIANT);
+    emit_int32(type);
+    emit_byte(1); // some is variant 1
+    emit_byte(1); // has payload
+    
+    type_push(type);
+}
+
+static void none_expr() {
+    Type type = MAKE_TYPE(VAL_ENUM, OPTION_ENUM_ID, VAL_ANY);
+    emit_byte(OP_ENUM_VARIANT);
+    emit_int32(type);
+    emit_byte(0); // none is variant 0
+    emit_byte(0); // no payload
+    
+    type_push(type);
+}
+
 static void variable() {
     Token name = parser.previous;
 
@@ -667,6 +763,42 @@ static void variable() {
     if (match(TOKEN_DOT)) {
         consume(TOKEN_ID, "Expect member name after '.'.");
         Token member = parser.previous;
+
+        // Check if it's an Enum variant
+        for (int i = 0; i < current_compiler->enum_count; i++) {
+            EnumDef* ed = &current_compiler->enums[i];
+            if (ed->name.length == name.length &&
+                memcmp(ed->name.start, name.start, name.length) == 0) {
+                
+                for (int v = 0; v < ed->variant_count; v++) {
+                    if (ed->variants[v].length == member.length &&
+                        memcmp(ed->variants[v].start, member.start, member.length) == 0) {
+                        
+                        if (ed->has_payload[v]) {
+                            consume(TOKEN_LPAREN, "Expect '(' for variant payload.");
+                            expression();
+                            Type p_type = type_pop();
+                            if (!is_assignable(ed->payload_types[v], p_type)) {
+                                error_at(&parser.previous, "Variant payload type mismatch.");
+                            }
+                            consume(TOKEN_RPAREN, "Expect ')' after variant payload.");
+                            
+                            emit_byte(OP_ENUM_VARIANT);
+                            emit_int32(MAKE_TYPE(VAL_ENUM, i, 0)); 
+                            emit_byte((uint8_t)v); 
+                            emit_byte(1); // Has payload
+                        } else {
+                            emit_byte(OP_ENUM_VARIANT);
+                            emit_int32(MAKE_TYPE(VAL_ENUM, i, 0));
+                            emit_byte((uint8_t)v);
+                            emit_byte(0); // No payload
+                        }
+                        type_push(MAKE_TYPE(VAL_ENUM, i, 0));
+                        return;
+                    }
+                }
+            }
+        }
         
         char full_name[256];
         memcpy(full_name, name.start, name.length);
@@ -696,8 +828,7 @@ static void variable() {
                     consume(TOKEN_RPAREN, "Expect ')' after arguments.");
                     if (arg_count != f->param_count) error_at(&member, "Wrong number of arguments.");
                     emit_byte(OP_CALL);
-                    patch_int32(current_chunk->count, f->addr);
-                    current_chunk->count += 4;
+                    emit_int32(f->addr);
                     type_push(f->return_type);
                 } else {
                     emit_push_func(f->addr, VAL_FUNC);
@@ -864,8 +995,7 @@ static void variable() {
             consume(TOKEN_RPAREN, "Expect ')' after arguments.");
             if (arg_count != f->param_count) error_at(&name, "Wrong number of arguments.");
             emit_byte(OP_CALL);
-            patch_int32(current_chunk->count, f->addr);
-            current_chunk->count += 4;
+            emit_int32(f->addr);
             type_push(f->return_type);
         } else {
             Type f_type = VAL_FUNC;
@@ -1017,6 +1147,10 @@ ParseRule rules[] = {
     [TOKEN_DOT]       = {NULL,     dot,        PREC_CALL},
     [TOKEN_ASSIGN]    = {NULL,     assignment, PREC_ASSIGNMENT},
     [TOKEN_THROW]     = {throw_op, NULL,       PREC_NONE},
+    [TOKEN_SOME]      = {some_expr, NULL,      PREC_NONE},
+    [TOKEN_NONE]      = {none_expr, NULL,      PREC_NONE},
+    [TOKEN_ENUM]      = {NULL,     NULL,       PREC_NONE},
+    [TOKEN_MATCH]     = {NULL,     NULL,       PREC_NONE},
     [TOKEN_EOF]       = {NULL,     NULL,       PREC_NONE},
 };
 
@@ -1096,6 +1230,45 @@ static void compile_internal(const char* prefix) {
 
             consume(TOKEN_COLON, "Expect ':'.");
             consume(TOKEN_TYPE, "Expect 'type' after struct name.");
+            continue;
+        }
+
+        if (match(TOKEN_ENUM)) {
+            consume(TOKEN_LBRACKET, "Expect '[' after 'enum'.");
+            EnumDef* ed = &current_compiler->enums[current_compiler->enum_count++];
+            ed->variant_count = 0;
+            ed->is_public = is_public;
+            while (parser.current.type != TOKEN_RBRACKET) {
+                consume(TOKEN_ID, "Expect variant name.");
+                ed->variants[ed->variant_count] = parser.previous;
+                if (match(TOKEN_LPAREN)) {
+                    ed->has_payload[ed->variant_count] = true;
+                    ed->payload_types[ed->variant_count] = parse_type();
+                    consume(TOKEN_RPAREN, "Expect ')' after variant payload type.");
+                } else {
+                    ed->has_payload[ed->variant_count] = false;
+                    ed->payload_types[ed->variant_count] = VAL_VOID;
+                }
+                ed->variant_count++;
+                if (parser.current.type == TOKEN_COMMA) advance();
+            }
+            consume(TOKEN_RBRACKET, "Expect ']' after enum variants.");
+            consume(TOKEN_ASSIGN, "Expect '=>' after enum definition.");
+            consume(TOKEN_ID, "Expect enum name.");
+            
+            Token name = parser.previous;
+            if (prefix != NULL) {
+                char* new_name = malloc(strlen(prefix) + name.length + 1);
+                strcpy(new_name, prefix);
+                strncat(new_name, name.start, name.length);
+                ed->name.start = new_name;
+                ed->name.length = (int)strlen(new_name);
+            } else {
+                ed->name = name;
+            }
+
+            consume(TOKEN_COLON, "Expect ':'.");
+            consume(TOKEN_TYPE, "Expect 'type' after enum name.");
             continue;
         }
 
@@ -1226,6 +1399,130 @@ static void handle_import(Token* path_token, Token* alias_token) {
 }
 
 static void statement() {
+    if (match(TOKEN_MATCH)) {
+        expression();
+        Type value_type = type_pop();
+        if (TYPE_KIND(value_type) != VAL_ENUM) {
+            error_at(&parser.previous, "Can only match on Enums or Options.");
+        }
+        
+        consume(TOKEN_LBRACKET, "Expect '[' after match expression.");
+        
+        int enum_id = TYPE_SUB(value_type);
+        EnumDef* ed = NULL;
+        if (enum_id != OPTION_ENUM_ID) {
+            ed = &current_compiler->enums[enum_id];
+        }
+        
+        bool covered[16] = {0};
+        int covered_count = 0;
+        int end_jumps[16];
+        int end_jump_count = 0;
+        
+        while (parser.current.type != TOKEN_RBRACKET && parser.current.type != TOKEN_EOF) {
+            Token variant_token = parser.current;
+            advance();
+            
+            int v_idx = -1;
+            bool is_some = false;
+            
+            if (enum_id == OPTION_ENUM_ID) {
+                if (variant_token.length == 4 && memcmp(variant_token.start, "some", 4) == 0) {
+                    v_idx = 1; is_some = true;
+                } else if (variant_token.length == 4 && memcmp(variant_token.start, "none", 4) == 0) {
+                    v_idx = 0;
+                } else {
+                    error_at(&variant_token, "Expected 'some' or 'none' for Option match.");
+                }
+            } else {
+                for (int i = 0; i < ed->variant_count; i++) {
+                    if (ed->variants[i].length == variant_token.length &&
+                        memcmp(ed->variants[i].start, variant_token.start, variant_token.length) == 0) {
+                        v_idx = i;
+                        break;
+                    }
+                }
+                if (v_idx == -1) error_at(&variant_token, "Unknown variant for this Enum.");
+            }
+            
+            if (v_idx != -1) {
+                if (v_idx < 16) {
+                    if (covered[v_idx]) error_at(&variant_token, "Variant already covered.");
+                    covered[v_idx] = true;
+                    covered_count++;
+                }
+            }
+            
+            bool has_binding = false;
+            Token binding_name;
+            if (match(TOKEN_LPAREN)) {
+                consume(TOKEN_ID, "Expect binding name.");
+                binding_name = parser.previous;
+                consume(TOKEN_RPAREN, "Expect ')' after binding.");
+                has_binding = true;
+                
+                if (enum_id == OPTION_ENUM_ID) {
+                    if (!is_some) error_at(&variant_token, "Only 'some' variant can have a payload.");
+                } else {
+                    if (!ed->has_payload[v_idx]) error_at(&variant_token, "Variant does not have a payload.");
+                }
+            } else {
+                if (enum_id != OPTION_ENUM_ID && ed->has_payload[v_idx]) {
+                     error_at(&variant_token, "Variant requires a payload binding.");
+                }
+                if (is_some) error_at(&variant_token, "'some' requires a payload binding.");
+            }
+            
+            emit_byte(OP_CHECK_VARIANT);
+            emit_int32(v_idx);
+            
+            int next_case_patch = current_chunk->count;
+            emit_byte(OP_JUMP_IF_F);
+            emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0);
+            
+            int old_local_count = current_compiler->local_count;
+            current_compiler->scope_depth++;
+            if (has_binding) {
+                Type p_type;
+                if (enum_id == OPTION_ENUM_ID) {
+                    p_type = MAKE_TYPE(TYPE_KEY(value_type), 0, 0);
+                } else {
+                    p_type = ed->payload_types[v_idx];
+                }
+                emit_byte(OP_GET_ENUM_PAYLOAD);
+                add_local(binding_name, p_type);
+                emit_bytes(OP_STORE, (uint8_t)(current_compiler->local_count - 1));
+            }
+            
+            block();
+            type_pop(); // Ignore block result in statement-level match
+            
+            end_jumps[end_jump_count++] = current_chunk->count;
+            emit_byte(OP_JUMP);
+            emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0);
+            
+            patch_int32(next_case_patch + 1, current_chunk->count);
+            current_compiler->local_count = old_local_count;
+            current_compiler->scope_depth--;
+        }
+        
+        consume(TOKEN_RBRACKET, "Expect ']' after match cases.");
+        
+        if (enum_id == OPTION_ENUM_ID) {
+            if (covered_count < 2) error_at(&parser.previous, "Match not exhaustive. Missing 'some' or 'none'.");
+        } else {
+            if (covered_count < ed->variant_count) error_at(&parser.previous, "Match not exhaustive.");
+        }
+        
+        for (int i = 0; i < end_jump_count; i++) {
+            patch_int32(end_jumps[i] + 1, current_chunk->count);
+        }
+        
+        emit_byte(OP_POP);
+        type_push(VAL_VOID);
+        return;
+    }
+
     if (match(TOKEN_SEMICOLON)) {
         type_push(VAL_VOID);
         return;
@@ -1259,14 +1556,17 @@ static void statement() {
         current_compiler->local_count--; // remove err local
         current_compiler->scope_depth--;
         
-        patch_int32(jump_over_catch_patch, current_chunk->count);
+        patch_int32(jump_over_catch_patch + 1, current_chunk->count);
         type_push(VAL_VOID);
         return;
     }
     int start_addr = current_chunk->count;
     expression();
     if (parser.current.type == TOKEN_QUESTION) {
-        if (type_pop() != VAL_BOOL) error_at(&parser.previous, "Condition must be boolean.");
+        Type cond_type = type_pop();
+        if (cond_type != VAL_BOOL) {
+            emit_byte(OP_IS_TRUTHY);
+        }
         advance();
         int jump_if_f_patch = current_chunk->count;
         emit_byte(OP_JUMP_IF_F);
@@ -1282,6 +1582,8 @@ static void statement() {
             if (parser.current.type == TOKEN_LBRACKET) block(); else statement();
             Type t2 = type_pop();
             if (t1 == t2) type_push(t1);
+            else if (is_assignable(t1, t2)) type_push(t1);
+            else if (is_assignable(t2, t1)) type_push(t2);
             else type_push(VAL_VOID);
         } else {
             type_push(VAL_VOID);
@@ -1289,7 +1591,10 @@ static void statement() {
         patch_int32(jump_patch + 1, current_chunk->count);
         match(TOKEN_SEMICOLON);
     } else if (parser.current.type == TOKEN_AT) {
-        if (type_pop() != VAL_BOOL) error_at(&parser.previous, "Condition must be boolean.");
+        Type cond_type = type_pop();
+        if (cond_type != VAL_BOOL) {
+            emit_byte(OP_IS_TRUTHY);
+        }
         advance();
         int jump_if_f_patch = current_chunk->count;
         emit_byte(OP_JUMP_IF_F);
@@ -1373,8 +1678,7 @@ Chunk* compiler_compile(const char* source, const char* base_dir, const char* st
 
     if (main_idx != -1) {
         emit_byte(OP_CALL);
-        patch_int32(current_chunk->count, current_compiler->functions[main_idx].addr);
-        current_chunk->count += 4;
+        emit_int32(current_compiler->functions[main_idx].addr);
     }
     emit_byte(OP_HALT);
     if (parser.had_error) { chunk_free(current_chunk); free(current_compiler); return NULL; }

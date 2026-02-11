@@ -47,7 +47,12 @@ typedef enum {
     OP_SET_INDEX,
     OP_TRY,
     OP_END_TRY,
-    OP_THROW
+    OP_THROW,
+    OP_ENUM_VARIANT,
+    OP_CHECK_VARIANT,
+    OP_GET_ENUM_PAYLOAD,
+    OP_EXTRACT_ENUM_PAYLOAD,
+    OP_IS_TRUTHY
 } OpCode;
 
 typedef enum {
@@ -67,8 +72,11 @@ typedef enum {
     VAL_IMP,
     VAL_MAP,
     VAL_ERR,
-    VAL_ANY
+    VAL_ANY,
+    VAL_ENUM
 } ValueType;
+
+#define OPTION_ENUM_ID 0xFF
 
 typedef uint32_t Type;
 #define TYPE_KIND(t) ((t) & 0xFF)
@@ -81,7 +89,8 @@ typedef enum {
     OBJ_ARRAY,
     OBJ_STRUCT,
     OBJ_NATIVE,
-    OBJ_MAP
+    OBJ_MAP,
+    OBJ_ENUM
 } ObjType;
 
 struct HeapObject {
@@ -134,6 +143,15 @@ typedef struct {
     int count;
     int capacity;
 } ObjMap;
+
+typedef struct {
+    HeapObject obj;
+    char* enum_name;
+    char* variant_name;
+    Value payload;
+    bool has_payload;
+    int variant_index;
+} ObjEnum;
 
 typedef struct VM VM;
 typedef Value (*NativeFn)(VM* vm, int arg_count, Value* args);
