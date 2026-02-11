@@ -1227,8 +1227,11 @@ void vm_run(VM* vm) {
                 else if (kind == VAL_ENUM) {
                     if (val.as.obj->type == OBJ_ENUM) {
                         ObjEnum* en = (ObjEnum*)val.as.obj;
-                        truthy = (en->variant_index != 0); // 0 is none for Option, or first variant for other enums. 
-                        // For Options, some is 1, none is 0.
+                        if (TYPE_SUB(val.type) == OPTION_ENUM_ID) {
+                            truthy = (en->variant_index != 0);
+                        } else {
+                            truthy = true;
+                        }
                     }
                 } else if (kind != VAL_VOID) truthy = true;
                 

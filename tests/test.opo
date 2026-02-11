@@ -10,8 +10,9 @@
     getAge("Vinícius") => age: int?
 
     age ? [
-        "Vinícius' age:  "+str(age.some) !!
-    ] : [
-        "Vinícius' age: unkown" !!
+        age.some !!
     ]
+
+    # error
+    # age.some
 ]

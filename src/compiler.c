@@ -19,6 +19,8 @@ typedef struct {
     Token name;
     Type type;
     int depth;
+    int guarded_depth;
+    int guarded_variant;
 } Local;
 
 typedef struct {
@@ -68,6 +70,7 @@ typedef struct {
     int native_count;
     int scope_depth;
     Type type_stack[STACK_MAX];
+    int local_stack[STACK_MAX];
     int type_stack_ptr;
 } CompilerState;
 
@@ -289,22 +292,31 @@ static void add_local(Token name, Type type) {
     local->name = name;
     local->type = type;
     local->depth = current_compiler->scope_depth;
+    local->guarded_depth = 0;
+    local->guarded_variant = -1;
 }
 
+static int next_push_local = -1;
 static Type type_push(Type type) {
     if (current_compiler->type_stack_ptr >= STACK_MAX) {
         error_at(&parser.current, "Compile-time type stack overflow.");
     }
+    current_compiler->local_stack[current_compiler->type_stack_ptr] = next_push_local;
     current_compiler->type_stack[current_compiler->type_stack_ptr++] = type;
+    next_push_local = -1;
     return type;
 }
 
+static int popped_local = -1;
 static Type type_pop() {
     if (current_compiler->type_stack_ptr <= 0) {
         error_at(&parser.current, "Compile-time type stack underflow.");
+        popped_local = -1;
         return VAL_VOID;
     }
-    return current_compiler->type_stack[--current_compiler->type_stack_ptr];
+    current_compiler->type_stack_ptr--;
+    popped_local = current_compiler->local_stack[current_compiler->type_stack_ptr];
+    return current_compiler->type_stack[current_compiler->type_stack_ptr];
 }
 
 static Type parse_type() {
@@ -647,10 +659,39 @@ static void dot() {
         if (field_idx != -1) {
             emit_bytes(OP_GET_MEMBER, (uint8_t)field_idx);
             type_push(current_compiler->structs[struct_idx].field_types[field_idx]);
-        } else if (TYPE_KIND(lhs_type) == VAL_ENUM && TYPE_SUB(lhs_type) == OPTION_ENUM_ID &&
-                   name.length == 4 && memcmp(name.start, "some", 4) == 0) {
-            emit_byte(OP_EXTRACT_ENUM_PAYLOAD);
-            type_push(MAKE_TYPE(TYPE_KEY(lhs_type), 0, 0));
+        } else if (TYPE_KIND(lhs_type) == VAL_ENUM) {
+            int enum_id = TYPE_SUB(lhs_type);
+            int variant_idx = -1;
+            Type payload_type = VAL_VOID;
+
+            if (enum_id == OPTION_ENUM_ID) {
+                if (name.length == 4 && memcmp(name.start, "some", 4) == 0) {
+                    variant_idx = 1;
+                    payload_type = MAKE_TYPE(TYPE_KEY(lhs_type), 0, 0);
+                }
+            } else {
+                EnumDef* ed = &current_compiler->enums[enum_id];
+                for (int v = 0; v < ed->variant_count; v++) {
+                    if (ed->variants[v].length == name.length &&
+                        memcmp(ed->variants[v].start, name.start, name.length) == 0) {
+                        variant_idx = v;
+                        payload_type = ed->payload_types[v];
+                        break;
+                    }
+                }
+            }
+
+            if (variant_idx != -1) {
+                int local_idx = popped_local;
+                if (local_idx == -1 || current_compiler->locals[local_idx].guarded_depth == 0 ||
+                    current_compiler->locals[local_idx].guarded_variant != variant_idx) {
+                    error_at(&name, "Unsafe unwrap of Enum variant. Use 'match' or existence check.");
+                }
+                emit_byte(OP_EXTRACT_ENUM_PAYLOAD);
+                type_push(payload_type);
+            } else {
+                error_at(&name, "Unknown Enum variant.");
+            }
         } else {
             // Try as a variable for dynamic indexing
             int arg = resolve_local(current_compiler, &name);
@@ -754,6 +795,7 @@ static void variable() {
             type_push(ret_type);
         } else {
             emit_bytes(OP_LOAD, (uint8_t)arg);
+            next_push_local = arg;
             type_push(type);
         }
         return;
@@ -1402,6 +1444,8 @@ static void statement() {
     if (match(TOKEN_MATCH)) {
         expression();
         Type value_type = type_pop();
+        int matched_local = popped_local;
+
         if (TYPE_KIND(value_type) != VAL_ENUM) {
             error_at(&parser.previous, "Can only match on Enums or Options.");
         }
@@ -1424,11 +1468,10 @@ static void statement() {
             advance();
             
             int v_idx = -1;
-            bool is_some = false;
             
             if (enum_id == OPTION_ENUM_ID) {
                 if (variant_token.length == 4 && memcmp(variant_token.start, "some", 4) == 0) {
-                    v_idx = 1; is_some = true;
+                    v_idx = 1;
                 } else if (variant_token.length == 4 && memcmp(variant_token.start, "none", 4) == 0) {
                     v_idx = 0;
                 } else {
@@ -1462,7 +1505,7 @@ static void statement() {
                 has_binding = true;
                 
                 if (enum_id == OPTION_ENUM_ID) {
-                    if (!is_some) error_at(&variant_token, "Only 'some' variant can have a payload.");
+                    if (v_idx != 1) error_at(&variant_token, "Only 'some' variant can have a payload.");
                 } else {
                     if (!ed->has_payload[v_idx]) error_at(&variant_token, "Variant does not have a payload.");
                 }
@@ -1470,7 +1513,7 @@ static void statement() {
                 if (enum_id != OPTION_ENUM_ID && ed->has_payload[v_idx]) {
                      error_at(&variant_token, "Variant requires a payload binding.");
                 }
-                if (is_some) error_at(&variant_token, "'some' requires a payload binding.");
+                if (enum_id == OPTION_ENUM_ID && v_idx == 1) error_at(&variant_token, "'some' requires a payload binding.");
             }
             
             emit_byte(OP_CHECK_VARIANT);
@@ -1482,6 +1525,16 @@ static void statement() {
             
             int old_local_count = current_compiler->local_count;
             current_compiler->scope_depth++;
+
+            int old_guarded = -1;
+            int old_variant = -1;
+            if (matched_local != -1) {
+                old_guarded = current_compiler->locals[matched_local].guarded_depth;
+                old_variant = current_compiler->locals[matched_local].guarded_variant;
+                current_compiler->locals[matched_local].guarded_depth = current_compiler->scope_depth;
+                current_compiler->locals[matched_local].guarded_variant = v_idx;
+            }
+
             if (has_binding) {
                 Type p_type;
                 if (enum_id == OPTION_ENUM_ID) {
@@ -1497,6 +1550,11 @@ static void statement() {
             block();
             type_pop(); // Ignore block result in statement-level match
             
+            if (matched_local != -1) {
+                current_compiler->locals[matched_local].guarded_depth = old_guarded;
+                current_compiler->locals[matched_local].guarded_variant = old_variant;
+            }
+
             end_jumps[end_jump_count++] = current_chunk->count;
             emit_byte(OP_JUMP);
             emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0);
@@ -1564,6 +1622,8 @@ static void statement() {
     expression();
     if (parser.current.type == TOKEN_QUESTION) {
         Type cond_type = type_pop();
+        int cond_local = popped_local;
+
         if (cond_type != VAL_BOOL) {
             emit_byte(OP_IS_TRUTHY);
         }
@@ -1571,8 +1631,24 @@ static void statement() {
         int jump_if_f_patch = current_chunk->count;
         emit_byte(OP_JUMP_IF_F);
         emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0); 
+        
+        int old_guarded = -1;
+        int old_variant = -1;
+        if (cond_local != -1) {
+            old_guarded = current_compiler->locals[cond_local].guarded_depth;
+            old_variant = current_compiler->locals[cond_local].guarded_variant;
+            current_compiler->locals[cond_local].guarded_depth = current_compiler->scope_depth + 1;
+            current_compiler->locals[cond_local].guarded_variant = 1; // 'some' variant for Options
+        }
+
         if (parser.current.type == TOKEN_LBRACKET) block(); else statement();
         Type t1 = type_pop();
+
+        if (cond_local != -1) {
+            current_compiler->locals[cond_local].guarded_depth = old_guarded;
+            current_compiler->locals[cond_local].guarded_variant = old_variant;
+        }
+
         int jump_patch = current_chunk->count;
         emit_byte(OP_JUMP);
         emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0); 
@@ -1592,6 +1668,8 @@ static void statement() {
         match(TOKEN_SEMICOLON);
     } else if (parser.current.type == TOKEN_AT) {
         Type cond_type = type_pop();
+        int cond_local = popped_local;
+
         if (cond_type != VAL_BOOL) {
             emit_byte(OP_IS_TRUTHY);
         }
@@ -1599,8 +1677,24 @@ static void statement() {
         int jump_if_f_patch = current_chunk->count;
         emit_byte(OP_JUMP_IF_F);
         emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0);
+
+        int old_guarded = -1;
+        int old_variant = -1;
+        if (cond_local != -1) {
+            old_guarded = current_compiler->locals[cond_local].guarded_depth;
+            old_variant = current_compiler->locals[cond_local].guarded_variant;
+            current_compiler->locals[cond_local].guarded_depth = current_compiler->scope_depth + 1;
+            current_compiler->locals[cond_local].guarded_variant = 1; // 'some' variant
+        }
+
         if (parser.current.type == TOKEN_LBRACKET) block(); else statement();
         type_pop();
+
+        if (cond_local != -1) {
+            current_compiler->locals[cond_local].guarded_depth = old_guarded;
+            current_compiler->locals[cond_local].guarded_variant = old_variant;
+        }
+
         emit_byte(OP_JUMP);
         for (int i = 0; i < 4; i++) emit_byte((start_addr >> (i * 8)) & 0xFF);
         patch_int32(jump_if_f_patch + 1, current_chunk->count);

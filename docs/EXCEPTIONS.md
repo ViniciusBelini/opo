@@ -1,6 +1,6 @@
 # Exception Handling in Opo
 
-Opo provides a `try-catch` mechanism and a `throw` statement for handling errors and exceptional conditions.
+Opo provides a `try-catch` mechanism and a `throw` statement for handling errors and exceptional conditions. It also features automatic capturing of runtime errors.
 
 ## Syntax
 
@@ -15,7 +15,23 @@ try [
 ]
 ```
 
-The `try` block is executed. If a `throw` statement is encountered (directly or in a function called from the block), execution immediately jumps to the `catch` block. The error value thrown is assigned to the specified `err_variable`.
+The `try` block is executed. If a `throw` statement is encountered, or if a **runtime error** occurs, execution immediately jumps to the `catch` block. The error value is assigned to the specified `err_variable`.
+
+### Runtime Error Capturing
+Opo's VM automatically converts low-level errors into catchable exceptions. This includes:
+- Division by zero
+- Array index out of bounds
+- Map key not found
+- Invalid member access
+
+Example:
+```
+try [
+    10 / 0 => x
+] catch e [
+    "Error during math: " + e !! # Prints: Error during math: Division by zero
+]
+```
 
 ### Throw
 `throw expression`
