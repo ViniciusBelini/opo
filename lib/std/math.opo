@@ -32,3 +32,6 @@ pub <x: flt> -> flt: sin_f [ sin(x) ]
 pub <x: flt> -> flt: cos_f [ cos(x) ]
 pub <x: flt> -> flt: tan_f [ tan(x) ]
 pub <x: flt> -> flt: log_f [ log(x) ]
+
+pub <x: flt, y: flt> -> flt: rand [ rand(x, y) ]
+pub <n: int> -> void: seed [ seed(n) ]

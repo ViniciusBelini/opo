@@ -16,6 +16,8 @@ Mathematical constants and functions.
 - `cos_f(x: flt) -> flt`
 - `tan_f(x: flt) -> flt`
 - `log_f(x: flt) -> flt`
+- `rand(x: flt, y: flt) -> flt`
+- `seed(n: int) -> void`
 
 ## `std/string`
 String manipulation utilities.

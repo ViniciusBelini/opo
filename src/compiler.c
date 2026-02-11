@@ -1753,6 +1753,9 @@ Chunk* compiler_compile(const char* source, const char* base_dir, const char* st
     add_native("cos", 22, VAL_FLT, 1, VAL_ANY);
     add_native("tan", 23, VAL_FLT, 1, VAL_ANY);
     add_native("log", 24, VAL_FLT, 1, VAL_ANY);
+    add_native("flt", 25, VAL_FLT, 1, VAL_ANY);
+    add_native("rand", 26, VAL_FLT, 2, VAL_FLT, VAL_FLT);
+    add_native("seed", 27, VAL_VOID, 1, VAL_INT);
 
     parser.had_error = false;
     parser.panic_mode = false;

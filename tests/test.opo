@@ -1,18 +1,3 @@
-<name: str> -> int?: getAge[
-    name == "Vinícius" ? [
-        some(20)
-    ] : [
-        none
-    ]
-]
-
 <> -> void: main[
-    getAge("Vinícius") => age: int?
-
-    age ? [
-        age.some !!
-    ]
-
-    # error
-    # age.some
+    flt(2.2) !!
 ]

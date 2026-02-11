@@ -11,13 +11,21 @@ Returns the length of a string or an array.
 
 ### `str(val)`
 Converts a value to its string representation.
-- Input: `int`, `flt`, `bol`, or `str`
+- Input: any
 - Output: `str`
+- Note: Supports most types including collections and enums.
 
 ### `int(val)`
 Converts a string or float to an integer.
 - Input: `str`, `flt`, or `int`
 - Output: `int`
+- Note: Generates a runtime error if the string format is invalid or the type is not supported.
+
+### `flt(val)`
+Converts a string or integer to a float.
+- Input: `str`, `int`, or `flt`
+- Output: `flt`
+- Note: Generates a runtime error if the string format is invalid or the type is not supported.
 
 ### `typeOf(val)`
 Returns the type of a value as a string.
@@ -119,3 +127,13 @@ Returns the current Unix timestamp.
 Mathematical functions.
 - Input: `int` or `flt`
 - Output: `flt`
+
+### `rand(x, y)`
+Returns a random float between `x` and `y` (inclusive).
+- Input: `flt` (x), `flt` (y)
+- Output: `flt`
+
+### `seed(n)`
+Seeds the random number generator.
+- Input: `int` (n)
+- Output: `void`

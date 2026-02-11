@@ -36,6 +36,7 @@ struct VM {
     int strings_count;
     int argc;
     char** argv;
+    bool panic;
 };
 
 void vm_init(VM* vm, uint8_t* code, char** strings, int strings_count, int argc, char** argv);

@@ -14,6 +14,7 @@ void retain(Value val) {
 }
 
 void release(Value val);
+static void runtime_error(VM* vm, const char* format, ...);
 
 static void free_object(HeapObject* obj) {
     switch (obj->type) {
@@ -239,7 +240,10 @@ static Value native_append(VM* vm, int arg_count, Value* args) {
 }
 
 static Value native_str(VM* vm, int arg_count, Value* args) {
-    if (arg_count != 1) return (Value){VAL_VOID, {0}};
+    if (arg_count != 1) {
+        runtime_error(vm, "str() expects 1 argument, got %d", arg_count);
+        return (Value){VAL_VOID, {0}};
+    }
     Value val = args[0];
     char buf[1024]; // Larger buffer for collections
     if (TYPE_KIND(val.type) == VAL_INT) sprintf(buf, "%ld", val.as.i_val);
@@ -356,15 +360,47 @@ static Value native_args(VM* vm, int arg_count, Value* args) {
 }
 
 static Value native_int(VM* vm, int arg_count, Value* args) {
-    (void)vm;
-    if (arg_count != 1) return (Value){VAL_VOID, {0}};
+    if (arg_count != 1) {
+        runtime_error(vm, "int() expects 1 argument, got %d", arg_count);
+        return (Value){VAL_VOID, {0}};
+    }
     Value val = args[0];
     if (TYPE_KIND(val.type) == VAL_INT) return val;
     if (TYPE_KIND(val.type) == VAL_FLT) return (Value){VAL_INT, {.i_val = (int64_t)val.as.f_val}};
     if ((TYPE_KIND(val.type) == VAL_OBJ || TYPE_KIND(val.type) == VAL_MAP) && val.as.obj->type == OBJ_STRING) {
-        return (Value){VAL_INT, {.i_val = strtoll(((ObjString*)val.as.obj)->chars, NULL, 10)}};
+        char* endptr;
+        const char* str = ((ObjString*)val.as.obj)->chars;
+        int64_t res = strtoll(str, &endptr, 10);
+        if (*str == '\0' || *endptr != '\0') {
+            runtime_error(vm, "Invalid format for int(): '%s'", str);
+            return (Value){VAL_VOID, {0}};
+        }
+        return (Value){VAL_INT, {.i_val = res}};
     }
-    return (Value){VAL_INT, {.i_val = 0}};
+    runtime_error(vm, "Cannot convert type to int");
+    return (Value){VAL_VOID, {0}};
+}
+
+static Value native_flt(VM* vm, int arg_count, Value* args) {
+    if (arg_count != 1) {
+        runtime_error(vm, "flt() expects 1 argument, got %d", arg_count);
+        return (Value){VAL_VOID, {0}};
+    }
+    Value val = args[0];
+    if (TYPE_KIND(val.type) == VAL_FLT) return val;
+    if (TYPE_KIND(val.type) == VAL_INT) return (Value){VAL_FLT, {.f_val = (double)val.as.i_val}};
+    if ((TYPE_KIND(val.type) == VAL_OBJ || TYPE_KIND(val.type) == VAL_MAP) && val.as.obj->type == OBJ_STRING) {
+        char* endptr;
+        const char* str = ((ObjString*)val.as.obj)->chars;
+        double res = strtod(str, &endptr);
+        if (*str == '\0' || *endptr != '\0') {
+            runtime_error(vm, "Invalid format for flt(): '%s'", str);
+            return (Value){VAL_VOID, {0}};
+        }
+        return (Value){VAL_FLT, {.f_val = res}};
+    }
+    runtime_error(vm, "Cannot convert type to flt");
+    return (Value){VAL_VOID, {0}};
 }
 
 static Value native_print(VM* vm, int arg_count, Value* args) {
@@ -568,6 +604,26 @@ static Value native_time(VM* vm, int arg_count, Value* args) {
     return (Value){VAL_INT, {.i_val = (int64_t)time(NULL)}};
 }
 
+static Value native_rand(VM* vm, int arg_count, Value* args) {
+    if (arg_count != 2 || TYPE_KIND(args[0].type) != VAL_FLT || TYPE_KIND(args[1].type) != VAL_FLT) {
+        runtime_error(vm, "rand() expects 2 flt arguments");
+        return (Value){VAL_VOID, {0}};
+    }
+    double x = args[0].as.f_val;
+    double y = args[1].as.f_val;
+    double r = (double)rand() / (double)RAND_MAX;
+    return (Value){VAL_FLT, {.f_val = x + r * (y - x)}};
+}
+
+static Value native_seed(VM* vm, int arg_count, Value* args) {
+    if (arg_count != 1 || TYPE_KIND(args[0].type) != VAL_INT) {
+        runtime_error(vm, "seed() expects 1 int argument");
+        return (Value){VAL_VOID, {0}};
+    }
+    srand((unsigned int)args[0].as.i_val);
+    return (Value){VAL_VOID, {0}};
+}
+
 static Value native_sqrt(VM* vm, int arg_count, Value* args) {
     (void)vm;
     if (arg_count != 1) return (Value){VAL_FLT, {.f_val = 0}};
@@ -625,6 +681,7 @@ void vm_init(VM* vm, uint8_t* code, char** strings, int strings_count, int argc,
     vm->strings_count = strings_count;
     vm->argc = argc;
     vm->argv = argv;
+    vm->panic = false;
     for (int i = 0; i < LOCALS_MAX; i++) {
         vm->locals[i].type = VAL_VOID;
     }
@@ -654,6 +711,9 @@ void vm_init(VM* vm, uint8_t* code, char** strings, int strings_count, int argc,
     vm_define_native(vm, "cos", native_cos, 22);
     vm_define_native(vm, "tan", native_tan, 23);
     vm_define_native(vm, "log", native_log, 24);
+    vm_define_native(vm, "flt", native_flt, 25);
+    vm_define_native(vm, "rand", native_rand, 26);
+    vm_define_native(vm, "seed", native_seed, 27);
 }
 
 void vm_push(VM* vm, Value val) {
@@ -682,6 +742,7 @@ static void runtime_error(VM* vm, const char* format, ...) {
 
     Value err_msg = (Value){VAL_OBJ, {.obj = (HeapObject*)allocate_string(vm, buf, (int)strlen(buf))}};
     retain(err_msg);
+    vm->panic = true;
     
     if (vm->try_ptr > 0) {
         TryFrame frame = vm->try_stack[--vm->try_ptr];
@@ -927,6 +988,7 @@ void vm_run(VM* vm) {
                 bool res = false;
                 if (TYPE_KIND(a.type) == TYPE_KIND(b.type)) {
                     if (TYPE_KIND(a.type) == VAL_INT) res = a.as.i_val == b.as.i_val;
+                    else if (TYPE_KIND(a.type) == VAL_FLT) res = a.as.f_val == b.as.f_val;
                     else if (TYPE_KIND(a.type) == VAL_BOOL) res = a.as.b_val == b.as.b_val;
                     else if (TYPE_KIND(a.type) == VAL_OBJ && TYPE_KIND(b.type) == VAL_OBJ) {
                         if (a.as.obj->type == OBJ_STRING && b.as.obj->type == OBJ_STRING) {
@@ -1269,6 +1331,11 @@ void vm_run(VM* vm) {
                     ObjNative* native = (ObjNative*)callable.as.obj;
                     Value* args = &vm->stack[vm->stack_ptr - arg_count];
                     Value result = native->function(vm, arg_count, args);
+                    if (vm->panic) {
+                        vm->panic = false;
+                        release(callable);
+                        break;
+                    }
                     retain(result);
                     for (int i = 0; i < arg_count; i++) release(vm_pop(vm));
                     vm_push(vm, result);

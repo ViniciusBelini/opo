@@ -1,0 +1,35 @@
+"std/string.opo" => string: imp
+
+<> -> void: main[
+    print("Weight (KG): ")
+    readLine() => weight: str
+
+    try[
+        flt(weight) => i_weight: flt
+    ]catch e[
+        println("Type a valid number")
+        exit(0)
+    ]
+
+    print("Height (m): ")
+    readLine() => height: str
+
+    try[
+        flt(height) => i_height: flt
+    ]catch e[
+        println("Type a valid float number")
+    ]
+
+    i_height * i_height => i_height
+    i_weight / i_height => bmi: flt
+
+    bmi < 18.5 ? [
+        println("Underweight: "+str(bmi))
+    ]bmi > 18.5 && bmi < 24.9 ? [
+        println("Underweight: "+str(bmi))
+    ]bmi > 25.0 && bmi < 29.9 ? [
+        println("Overweight: "+str(bmi))
+    ]bmi > 30.0 ? [
+        println("Obesity: "+str(bmi))
+    ]
+]
