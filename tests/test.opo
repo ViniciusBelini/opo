@@ -1,3 +1,11 @@
 <> -> void: main[
-    flt(2.2) !!
+    20 => idd: int
+
+    idd > 15 ? [
+	    println("condição um")
+	]idd == 20 ? [
+		println("Condição dois")
+	]:[
+		println("Condição três")
+	]
 ]

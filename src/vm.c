@@ -604,11 +604,19 @@ static Value native_time(VM* vm, int arg_count, Value* args) {
     return (Value){VAL_INT, {.i_val = (int64_t)time(NULL)}};
 }
 
+static bool rand_seeded = false;
+
 static Value native_rand(VM* vm, int arg_count, Value* args) {
     if (arg_count != 2 || TYPE_KIND(args[0].type) != VAL_FLT || TYPE_KIND(args[1].type) != VAL_FLT) {
         runtime_error(vm, "rand() expects 2 flt arguments");
         return (Value){VAL_VOID, {0}};
     }
+
+    if (!rand_seeded) {
+        srand((unsigned int)time(NULL));
+        rand_seeded = true;
+    }
+
     double x = args[0].as.f_val;
     double y = args[1].as.f_val;
     double r = (double)rand() / (double)RAND_MAX;
@@ -621,6 +629,7 @@ static Value native_seed(VM* vm, int arg_count, Value* args) {
         return (Value){VAL_VOID, {0}};
     }
     srand((unsigned int)args[0].as.i_val);
+    rand_seeded = true;
     return (Value){VAL_VOID, {0}};
 }
 
