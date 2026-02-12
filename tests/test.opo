@@ -1,11 +1,5 @@
-<> -> void: main[
-    20 => idd: int
+"std/string.opo" => string: imp
 
-    idd > 15 ? [
-	    println("condição um")
-	] : idd == 20 ? [
-		println("Condição dois")
-	]:[
-		println("Condição três")
-	]
+<> -> void: main[
+	string.split("Olá mundo!", " ") !!
 ]

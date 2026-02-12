@@ -90,3 +90,36 @@ pub <s: str> -> str: to_lower [
     ]
     res
 ]
+
+pub <s: str, delimiter: str> -> []str: split[
+    [] => result: []str
+    0 => start: int
+    "" => char_list: str
+
+    start < len(s) @ [
+		"" => char_split: str
+		0 => i: int
+		i < len(delimiter) @ [
+			start+1 < len(s) ? [
+				char_split + s.(start+i) => char_split
+			]
+			i + 1 => i
+		]
+
+		delimiter == char_split ? [
+			start + i => start
+			append(result, char_list) => result
+			"" => char_list
+		]
+
+		char_list+s.start => char_list
+
+		start + 1 => start
+	]
+
+	char_list != "" ? [
+		append(result, char_list) => result
+	]
+
+	result
+]
