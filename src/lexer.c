@@ -153,7 +153,8 @@ Token lexer_next_token() {
     if (isalpha(c) || c == '_') return identifier();
 
     switch (c) {
-        case '.': return make_token(TOKEN_DOT);
+        case '.': return match('.') ? make_token(TOKEN_DOT_DOT) : make_token(TOKEN_DOT);
+        case '^': return make_token(TOKEN_HAT);
         case ':': return make_token(TOKEN_COLON);
         case ';': return make_token(TOKEN_SEMICOLON);
         case ',': return make_token(TOKEN_COMMA);

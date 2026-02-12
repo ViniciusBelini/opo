@@ -32,6 +32,13 @@ typedef struct {
     bool is_public;
 } Function;
 
+typedef struct Loop {
+    int start_addr;
+    int end_jump_patches[64];
+    int end_jump_count;
+    struct Loop* next;
+} Loop;
+
 typedef struct {
     Token name;
     Token fields[16];
@@ -69,6 +76,8 @@ typedef struct {
     Native natives[64];
     int native_count;
     int scope_depth;
+    Loop* current_loop;
+    Type current_return_type;
     Type type_stack[STACK_MAX];
     int local_stack[STACK_MAX];
     int type_stack_ptr;
@@ -1162,6 +1171,51 @@ static void print_op() {
     type_push(VAL_VOID);
 }
 
+static void break_op() {
+    if (current_compiler->current_loop == NULL) {
+        error_at(&parser.previous, "Cannot use '.' (break) outside of a loop.");
+        return;
+    }
+    Loop* loop = current_compiler->current_loop;
+    if (loop->end_jump_count >= 64) {
+        error_at(&parser.previous, "Too many breaks in loop.");
+        return;
+    }
+    loop->end_jump_patches[loop->end_jump_count++] = current_chunk->count;
+    emit_byte(OP_JUMP);
+    emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0);
+    type_push(VAL_VOID);
+}
+
+static void continue_op() {
+    if (current_compiler->current_loop == NULL) {
+        error_at(&parser.previous, "Cannot use '..' (continue) outside of a loop.");
+        return;
+    }
+    emit_byte(OP_JUMP);
+    emit_int32(current_compiler->current_loop->start_addr);
+    type_push(VAL_VOID);
+}
+
+static void return_op() {
+    Type t = VAL_VOID;
+    if (parser.current.type == TOKEN_RBRACKET || parser.current.type == TOKEN_SEMICOLON) {
+        if (!is_assignable(current_compiler->current_return_type, VAL_VOID)) {
+            error_at(&parser.previous, "Must return a value in non-void function.");
+        }
+        emit_int(0);
+        t = VAL_VOID;
+    } else {
+        expression();
+        t = type_pop();
+        if (!is_assignable(current_compiler->current_return_type, t)) {
+            error_at(&parser.previous, "Return type mismatch.");
+        }
+    }
+    emit_byte(OP_RET);
+    type_push(t);
+}
+
 ParseRule rules[] = {
     [TOKEN_INT]       = {number,   NULL,       PREC_NONE},
     [TOKEN_FLT]       = {number,   NULL,       PREC_NONE},
@@ -1186,7 +1240,9 @@ ParseRule rules[] = {
     [TOKEN_LPAREN]    = {grouping, NULL,       PREC_NONE},
     [TOKEN_LBRACKET]  = {array_literal, NULL,  PREC_NONE},
     [TOKEN_LBRACE]    = {map_literal,   NULL,  PREC_NONE},
-    [TOKEN_DOT]       = {NULL,     dot,        PREC_CALL},
+    [TOKEN_DOT]       = {break_op, dot,        PREC_CALL},
+    [TOKEN_DOT_DOT]   = {continue_op, NULL,    PREC_NONE},
+    [TOKEN_HAT]       = {return_op, NULL,      PREC_NONE},
     [TOKEN_ASSIGN]    = {NULL,     assignment, PREC_ASSIGNMENT},
     [TOKEN_THROW]     = {throw_op, NULL,       PREC_NONE},
     [TOKEN_SOME]      = {some_expr, NULL,      PREC_NONE},
@@ -1355,6 +1411,10 @@ static void compile_internal(const char* prefix) {
             current_compiler->local_count = 0;
             for (int i = 0; i < param_count; i++) add_local(params[i], param_types[i]);
             for (int i = param_count - 1; i >= 0; i--) emit_bytes(OP_STORE, (uint8_t)i);
+            
+            Type old_return_type = current_compiler->current_return_type;
+            current_compiler->current_return_type = return_type;
+            
             block();
             Type actual_ret = type_pop();
             if (!is_assignable(return_type, actual_ret)) {
@@ -1363,6 +1423,7 @@ static void compile_internal(const char* prefix) {
             emit_byte(OP_RET);
             patch_int32(jump_over + 1, current_chunk->count);
             current_compiler->local_count = old_local_count;
+            current_compiler->current_return_type = old_return_type;
             current_compiler->type_stack_ptr = 0;
             continue;
         }
@@ -1674,6 +1735,13 @@ static void statement() {
             emit_byte(OP_IS_TRUTHY);
         }
         advance();
+
+        Loop loop;
+        loop.start_addr = start_addr;
+        loop.end_jump_count = 0;
+        loop.next = current_compiler->current_loop;
+        current_compiler->current_loop = &loop;
+
         int jump_if_f_patch = current_chunk->count;
         emit_byte(OP_JUMP_IF_F);
         emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0);
@@ -1698,6 +1766,12 @@ static void statement() {
         emit_byte(OP_JUMP);
         for (int i = 0; i < 4; i++) emit_byte((start_addr >> (i * 8)) & 0xFF);
         patch_int32(jump_if_f_patch + 1, current_chunk->count);
+        
+        for (int i = 0; i < loop.end_jump_count; i++) {
+            patch_int32(loop.end_jump_patches[i] + 1, current_chunk->count);
+        }
+        current_compiler->current_loop = loop.next;
+
         match(TOKEN_SEMICOLON);
         type_push(VAL_VOID);
     } else {
@@ -1728,6 +1802,8 @@ Chunk* compiler_compile(const char* source, const char* base_dir, const char* st
     current_compiler->struct_count = 0;
     current_compiler->native_count = 0;
     current_compiler->scope_depth = 0;
+    current_compiler->current_loop = NULL;
+    current_compiler->current_return_type = VAL_VOID;
     add_native("len", 0, VAL_INT, 1, VAL_OBJ);
     add_native("append", 1, VAL_OBJ, 2, VAL_OBJ, VAL_ANY);
     add_native("str", 2, VAL_STR, 1, VAL_ANY);

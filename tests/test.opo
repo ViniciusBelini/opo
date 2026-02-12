@@ -1,5 +1,14 @@
-"std/string.opo" => string: imp
+<> -> int: test[
+	0 => i: int
+
+	i < 100 @ [
+		i+1 => i
+		^ i
+	]
+
+	^ 0
+]
 
 <> -> void: main[
-	string.split("Olá mundo!", " ") !!
+	test() !!
 ]
