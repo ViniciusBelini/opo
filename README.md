@@ -85,14 +85,12 @@ Example:
 ]
 ```
 
-### Entry Point and Top-Level Code
-Opo allows top-level statements and expressions, which are executed in order. Additionally, if a `main` function is defined, it will be called automatically after the top-level code finishes.
+### Entry Point
+The program starts execution from the `main` function. All code must be inside functions.
 
 ```
-"Starting program..." !!
-
 <> -> void: main [
-    "Inside main" !!
+    println("Hello world!")
 ]
 ```
 
