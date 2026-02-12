@@ -3,7 +3,7 @@
 
     idd > 15 ? [
 	    println("condição um")
-	]idd == 20 ? [
+	] : idd == 20 ? [
 		println("Condição dois")
 	]:[
 		println("Condição três")

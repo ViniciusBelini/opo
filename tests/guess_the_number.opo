@@ -1,5 +1,5 @@
 <> -> void: play[
-    seed(time())
+    # seed(time())
 
     int(rand(1.0, 100.0)) => secrete_number: int
     0 => attempts: int
@@ -16,9 +16,9 @@
 
             guess < secrete_number ? [
                 println("Too low! Try a higher number.")
-            ]guess > secrete_number ? [
+            ] : guess > secrete_number ? [
                 println("Too high! Try a lower number.")
-            ]guess == secrete_number ? [
+            ] : guess == secrete_number ? [
                 println("Congratulations! You guessed the number "+str(secrete_number)+" in "+str(attempts)+" attempts.")
             ]
         ]catch e[
