@@ -1,0 +1,21 @@
+<> -> void: main [
+    10 => x: any
+    
+    # This should fail to compile if I'm right
+    # (x + 1) !!
+    
+    match x [
+        int(i) [
+            "Matched int: " + str(i + 1) !!
+        ]
+        str(s) [
+            "Matched str: " + s !!
+        ]
+    ]
+    
+    "hello" => y: any
+    match y [
+        int(i) [ "int" !! ]
+        str(s) [ "Matched str: " + s !! ]
+    ]
+]

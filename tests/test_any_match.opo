@@ -1,0 +1,6 @@
+<> -> void: main [
+    1 => x: any
+    match x [
+        int(i) [ "int" !! ]
+    ]
+]

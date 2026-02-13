@@ -1,0 +1,4 @@
+<> -> void: main [
+    chan<int>(2) => ch: chan<int>
+    "Created chan" !!
+]

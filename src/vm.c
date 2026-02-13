@@ -4,11 +4,14 @@
 #include <time.h>
 #include <math.h>
 #include <stdarg.h>
+#include <ctype.h>
+#include <dlfcn.h>
+#include <ffi.h>
 #include "vm.h"
 
 void retain(Value val) {
     int kind = TYPE_KIND(val.type);
-    if ((kind == VAL_OBJ || kind == VAL_MAP || kind == VAL_ENUM) && val.as.obj != NULL) {
+    if ((kind == VAL_OBJ || kind == VAL_MAP || kind == VAL_ENUM || kind == VAL_CHAN) && val.as.obj != NULL) {
         val.as.obj->ref_count++;
     }
 }
@@ -68,12 +71,24 @@ static void free_object(HeapObject* obj) {
             free(en);
             break;
         }
+        case OBJ_CHAN: {
+            ObjChan* chan = (ObjChan*)obj;
+            for (int i = 0; i < chan->count; i++) {
+                release(chan->buffer[(chan->head + i) % chan->capacity]);
+            }
+            free(chan->buffer);
+            pthread_mutex_destroy(&chan->mutex);
+            pthread_cond_destroy(&chan->send_cond);
+            pthread_cond_destroy(&chan->recv_cond);
+            free(chan);
+            break;
+        }
     }
 }
 
 void release(Value val) {
     int kind = TYPE_KIND(val.type);
-    if ((kind == VAL_OBJ || kind == VAL_MAP || kind == VAL_ENUM) && val.as.obj != NULL) {
+    if ((kind == VAL_OBJ || kind == VAL_MAP || kind == VAL_ENUM || kind == VAL_CHAN) && val.as.obj != NULL) {
         val.as.obj->ref_count--;
         if (val.as.obj->ref_count <= 0) {
             free_object(val.as.obj);
@@ -115,6 +130,23 @@ ObjMap* allocate_map(VM* vm) {
     map->count = 0;
     map->entries = calloc(map->capacity, sizeof(MapEntry));
     return map;
+}
+
+ObjChan* allocate_chan(VM* vm, int capacity) {
+    (void)vm;
+    ObjChan* chan = malloc(sizeof(ObjChan));
+    chan->obj.type = OBJ_CHAN;
+    chan->obj.ref_count = 0;
+    chan->capacity = capacity > 0 ? capacity : 1;
+    chan->buffer = malloc(sizeof(Value) * chan->capacity);
+    chan->count = 0;
+    chan->head = 0;
+    chan->tail = 0;
+    chan->closed = false;
+    pthread_mutex_init(&chan->mutex, NULL);
+    pthread_cond_init(&chan->send_cond, NULL);
+    pthread_cond_init(&chan->recv_cond, NULL);
+    return chan;
 }
 
 static uint32_t hash_value(Value v) {
@@ -250,7 +282,11 @@ static Value native_str(VM* vm, int arg_count, Value* args) {
     else if (TYPE_KIND(val.type) == VAL_FLT) sprintf(buf, "%g", val.as.f_val);
     else if (TYPE_KIND(val.type) == VAL_BOOL) sprintf(buf, "%s", val.as.b_val ? "tru" : "fls");
     else if (TYPE_KIND(val.type) == VAL_VOID) strcpy(buf, "void");
-    else if (TYPE_KIND(val.type) == VAL_STR || (TYPE_KIND(val.type) == VAL_OBJ && val.as.obj->type == OBJ_STRING)) {
+    else if (TYPE_KIND(val.type) == VAL_STR) {
+        ObjString* s = allocate_string(vm, vm->strings[val.as.s_idx], (int)strlen(vm->strings[val.as.s_idx]));
+        return (Value){VAL_OBJ, {.obj = (HeapObject*)s}};
+    }
+    else if (TYPE_KIND(val.type) == VAL_OBJ && val.as.obj->type == OBJ_STRING) {
         retain(val);
         return val;
     }
@@ -288,6 +324,9 @@ static Value native_str(VM* vm, int arg_count, Value* args) {
         Value s = native_str(vm, 1, &inner);
         sprintf(buf, "Error: %s", ((ObjString*)s.as.obj)->chars);
         release(s);
+    }
+    else if (TYPE_KIND(val.type) == VAL_CHAN) {
+        sprintf(buf, "<chan:%p>", val.as.obj);
     }
     else if (TYPE_KIND(val.type) == VAL_ENUM) {
         ObjEnum* en = (ObjEnum*)val.as.obj;
@@ -569,6 +608,11 @@ static char* type_to_string(Type t, char* buf) {
         case VAL_FUNC_VOID:
             strcpy(buf, "fun");
             break;
+        case VAL_CHAN: {
+            char sub_buf[64];
+            sprintf(buf, "chan<%s>", type_to_string(sub, sub_buf));
+            break;
+        }
         case VAL_ENUM: {
             if (sub == OPTION_ENUM_ID) {
                 char key_buf[64];
@@ -630,6 +674,312 @@ static Value native_seed(VM* vm, int arg_count, Value* args) {
     }
     srand((unsigned int)args[0].as.i_val);
     rand_seeded = true;
+    return (Value){VAL_VOID, {0}};
+}
+
+static Value native_ffiLoad(VM* vm, int arg_count, Value* args) {
+    if (arg_count != 1 || TYPE_KIND(args[0].type) != VAL_OBJ || args[0].as.obj->type != OBJ_STRING) {
+        runtime_error(vm, "ffiLoad() expects 1 string argument");
+        return (Value){VAL_VOID, {0}};
+    }
+    const char* path = ((ObjString*)args[0].as.obj)->chars;
+    if (strlen(path) == 0) path = NULL;
+    void* handle = dlopen(path, RTLD_LAZY | RTLD_GLOBAL);
+    if (!handle) {
+        runtime_error(vm, "Could not load library: %s", dlerror());
+        return (Value){VAL_VOID, {0}};
+    }
+    return (Value){VAL_INT, {.i_val = (int64_t)handle}};
+}
+
+static Value native_ffiCall(VM* vm, int arg_count, Value* args) {
+    if (arg_count < 4) {
+        runtime_error(vm, "ffiCall() expects at least 4 arguments");
+        return (Value){VAL_VOID, {0}};
+    }
+
+    void* handle = (void*)args[0].as.i_val;
+    const char* name = ((ObjString*)args[1].as.obj)->chars;
+    const char* arg_types_str = ((ObjString*)args[2].as.obj)->chars;
+    const char* ret_type_str = ((ObjString*)args[3].as.obj)->chars;
+
+    void* func = dlsym(handle, name);
+    if (!func) {
+        runtime_error(vm, "Could not find symbol: %s", name);
+        return (Value){VAL_VOID, {0}};
+    }
+
+    int n_args = strlen(arg_types_str);
+    if (arg_count - 4 != n_args) {
+        runtime_error(vm, "ffiCall(): expected %d arguments, got %d", n_args, arg_count - 4);
+        return (Value){VAL_VOID, {0}};
+    }
+
+    ffi_cif cif;
+    ffi_type* arg_types[32];
+    void* arg_values[32];
+
+    for (int i = 0; i < n_args; i++) {
+        switch (arg_types_str[i]) {
+            case 'i':
+                arg_types[i] = &ffi_type_sint64;
+                arg_values[i] = &args[4 + i].as.i_val;
+                break;
+            case 'f':
+                arg_types[i] = &ffi_type_double;
+                arg_values[i] = &args[4 + i].as.f_val;
+                break;
+            case 's':
+                arg_types[i] = &ffi_type_pointer;
+                arg_values[i] = &((ObjString*)args[4+i].as.obj)->chars;
+                break;
+            case 'p':
+                arg_types[i] = &ffi_type_pointer;
+                arg_values[i] = &args[4 + i].as.i_val;
+                break;
+            default:
+                runtime_error(vm, "Unknown FFI argument type: %c", arg_types_str[i]);
+                return (Value){VAL_VOID, {0}};
+        }
+    }
+
+    ffi_type* rtype;
+    switch (ret_type_str[0]) {
+        case 'v': rtype = &ffi_type_void; break;
+        case 'i': rtype = &ffi_type_sint64; break;
+        case 'f': rtype = &ffi_type_double; break;
+        case 's': rtype = &ffi_type_pointer; break;
+        case 'p': rtype = &ffi_type_pointer; break;
+        default:
+            runtime_error(vm, "Unknown FFI return type: %c", ret_type_str[0]);
+            return (Value){VAL_VOID, {0}};
+    }
+
+    if (ffi_prep_cif(&cif, FFI_DEFAULT_ABI, n_args, rtype, arg_types) != FFI_OK) {
+        runtime_error(vm, "ffi_prep_cif failed");
+        return (Value){VAL_VOID, {0}};
+    }
+
+    union {
+        int64_t i;
+        double f;
+        void* p;
+    } result;
+
+    ffi_call(&cif, FFI_FN(func), &result, arg_values);
+
+    switch (ret_type_str[0]) {
+        case 'v': return (Value){VAL_VOID, {0}};
+        case 'i': return (Value){VAL_INT, {.i_val = result.i}};
+        case 'f': return (Value){VAL_FLT, {.f_val = result.f}};
+        case 's': {
+            if (result.p == NULL) return (Value){VAL_VOID, {0}};
+            ObjString* s = allocate_string(vm, (char*)result.p, strlen((char*)result.p));
+            return (Value){VAL_OBJ, {.obj = (HeapObject*)s}};
+        }
+        case 'p': return (Value){VAL_INT, {.i_val = (int64_t)result.p}};
+        default: return (Value){VAL_VOID, {0}};
+    }
+}
+
+static Value native_json_stringify(VM* vm, int arg_count, Value* args);
+static Value native_json_parse(VM* vm, int arg_count, Value* args);
+
+static void stringify_inner(VM* vm, Value v, char* b) {
+    int kind = TYPE_KIND(v.type);
+    if (kind == VAL_INT) sprintf(b + strlen(b), "%ld", v.as.i_val);
+    else if (kind == VAL_FLT) sprintf(b + strlen(b), "%g", v.as.f_val);
+    else if (kind == VAL_BOOL) strcat(b, v.as.b_val ? "true" : "false");
+    else if (kind == VAL_VOID) strcat(b, "null");
+    else if (kind == VAL_STR) {
+        strcat(b, "\"");
+        strcat(b, vm->strings[v.as.s_idx]);
+        strcat(b, "\"");
+    }
+    else if (kind == VAL_OBJ && v.as.obj->type == OBJ_STRING) {
+        strcat(b, "\"");
+        strcat(b, ((ObjString*)v.as.obj)->chars);
+        strcat(b, "\"");
+    }
+    else if (kind == VAL_OBJ && v.as.obj->type == OBJ_ARRAY) {
+        ObjArray* array = (ObjArray*)v.as.obj;
+        strcat(b, "[");
+        for (int i = 0; i < array->count; i++) {
+            stringify_inner(vm, array->items[i], b);
+            if (i < array->count - 1) strcat(b, ",");
+        }
+        strcat(b, "]");
+    }
+    else if ((kind == VAL_OBJ || kind == VAL_MAP) && v.as.obj->type == OBJ_MAP) {
+        ObjMap* map = (ObjMap*)v.as.obj;
+        strcat(b, "{");
+        bool first = true;
+        for (int i = 0; i < map->capacity; i++) {
+            if (map->entries[i].is_used) {
+                if (!first) strcat(b, ",");
+                stringify_inner(vm, map->entries[i].key, b);
+                strcat(b, ":");
+                stringify_inner(vm, map->entries[i].value, b);
+                first = false;
+            }
+        }
+        strcat(b, "}");
+    } else {
+        strcat(b, "null");
+    }
+}
+
+static Value native_json_stringify(VM* vm, int arg_count, Value* args) {
+    if (arg_count != 1) return (Value){VAL_VOID, {0}};
+    Value val = args[0];
+    char* buf = malloc(1024 * 10); // 10KB buffer for now
+    buf[0] = '\0';
+    stringify_inner(vm, val, buf);
+    ObjString* s = allocate_string(vm, buf, (int)strlen(buf));
+    free(buf);
+    return (Value){VAL_OBJ, {.obj = (HeapObject*)s}};
+}
+
+static void skip_space(const char** pp) {
+    while (**pp && isspace(**pp)) (*pp)++;
+}
+
+static Value parse_value(VM* vm, const char** pp);
+
+static Value parse_string(VM* vm, const char** pp) {
+    (*pp)++; // skip "
+    const char* start = *pp;
+    while (**pp && **pp != '"') (*pp)++;
+    int len = (int)(*pp - start);
+    ObjString* s = allocate_string(vm, start, len);
+    if (**pp == '"') (*pp)++;
+    return (Value){VAL_OBJ, {.obj = (HeapObject*)s}};
+}
+
+static Value parse_number(const char** pp) {
+    char* end;
+    double d = strtod(*pp, &end);
+    *pp = end;
+    if (d == (double)(int64_t)d) return (Value){VAL_INT, {.i_val = (int64_t)d}};
+    return (Value){VAL_FLT, {.f_val = d}};
+}
+
+static Value parse_bool(const char** pp, bool val) {
+    *pp += (val ? 4 : 5);
+    return (Value){VAL_BOOL, {.b_val = val}};
+}
+
+static Value parse_null(const char** pp) {
+    *pp += 4;
+    return (Value){VAL_VOID, {0}};
+}
+
+static Value parse_array(VM* vm, const char** pp) {
+    (*pp)++; // skip [
+    ObjArray* array = allocate_array(vm);
+    retain((Value){VAL_OBJ, {.obj = (HeapObject*)array}});
+    skip_space(pp);
+    while (**pp && **pp != ']') {
+        Value v = parse_value(vm, pp);
+        if (array->count >= array->capacity) {
+            array->capacity = array->capacity < 8 ? 8 : array->capacity * 2;
+            array->items = realloc(array->items, sizeof(Value) * array->capacity);
+        }
+        array->items[array->count++] = v;
+        retain(v);
+        skip_space(pp);
+        if (**pp == ',') { (*pp)++; skip_space(pp); }
+    }
+    if (**pp == ']') (*pp)++;
+    return (Value){MAKE_TYPE(VAL_OBJ, VAL_ANY, 0), {.obj = (HeapObject*)array}};
+}
+
+static Value parse_object(VM* vm, const char** pp) {
+    (*pp)++; // skip {
+    ObjMap* map = allocate_map(vm);
+    skip_space(pp);
+    while (**pp && **pp != '}') {
+        Value key = parse_value(vm, pp);
+        skip_space(pp);
+        if (**pp == ':') (*pp)++;
+        skip_space(pp);
+        Value val = parse_value(vm, pp);
+        map_set(map, key, val);
+        // map_set handles retains
+        skip_space(pp);
+        if (**pp == ',') { (*pp)++; skip_space(pp); }
+    }
+    if (**pp == '}') (*pp)++;
+    return (Value){MAKE_TYPE(VAL_MAP, VAL_ANY, VAL_ANY), {.obj = (HeapObject*)map}};
+}
+
+static Value parse_value(VM* vm, const char** pp) {
+    skip_space(pp);
+    if (**pp == '"') return parse_string(vm, pp);
+    if (**pp == '[') return parse_array(vm, pp);
+    if (**pp == '{') return parse_object(vm, pp);
+    if (isdigit(**pp) || **pp == '-') return parse_number(pp);
+    if (strncmp(*pp, "true", 4) == 0) return parse_bool(pp, true);
+    if (strncmp(*pp, "false", 5) == 0) return parse_bool(pp, false);
+    if (strncmp(*pp, "null", 4) == 0) return parse_null(pp);
+    return (Value){VAL_VOID, {0}};
+}
+
+static Value native_httpGet(VM* vm, int arg_count, Value* args) {
+    if (arg_count != 1 || TYPE_KIND(args[0].type) != VAL_OBJ || args[0].as.obj->type != OBJ_STRING) {
+        runtime_error(vm, "httpGet() expects 1 string argument");
+        return (Value){VAL_VOID, {0}};
+    }
+    const char* url = ((ObjString*)args[0].as.obj)->chars;
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), "curl -s -L \"%s\"", url);
+    
+    FILE* fp = popen(cmd, "r");
+    if (fp == NULL) return (Value){VAL_VOID, {0}};
+    
+    char* result = malloc(1024 * 64); // 64KB for now
+    size_t total_read = 0;
+    size_t current_size = 1024 * 64;
+    
+    char chunk[4096];
+    while (fgets(chunk, sizeof(chunk), fp) != NULL) {
+        size_t chunk_len = strlen(chunk);
+        if (total_read + chunk_len >= current_size) {
+            current_size *= 2;
+            result = realloc(result, current_size);
+        }
+        memcpy(result + total_read, chunk, chunk_len);
+        total_read += chunk_len;
+    }
+    pclose(fp);
+    result[total_read] = '\0';
+    
+    ObjString* s = allocate_string(vm, result, (int)total_read);
+    free(result);
+    return (Value){VAL_OBJ, {.obj = (HeapObject*)s}};
+}
+
+static Value native_json_parse(VM* vm, int arg_count, Value* args) {
+    if (arg_count != 1 || TYPE_KIND(args[0].type) != VAL_OBJ || args[0].as.obj->type != OBJ_STRING) {
+        runtime_error(vm, "json_parse() expects 1 string argument");
+        return (Value){VAL_VOID, {0}};
+    }
+    const char* json = ((ObjString*)args[0].as.obj)->chars;
+    const char* p = json;
+    return parse_value(vm, &p);
+}
+
+static Value native_close(VM* vm, int arg_count, Value* args) {
+    if (arg_count != 1 || TYPE_KIND(args[0].type) != VAL_CHAN) {
+        runtime_error(vm, "close() expects 1 channel argument");
+        return (Value){VAL_VOID, {0}};
+    }
+    ObjChan* chan = (ObjChan*)args[0].as.obj;
+    pthread_mutex_lock(&chan->mutex);
+    chan->closed = true;
+    pthread_cond_broadcast(&chan->send_cond);
+    pthread_cond_broadcast(&chan->recv_cond);
+    pthread_mutex_unlock(&chan->mutex);
     return (Value){VAL_VOID, {0}};
 }
 
@@ -723,6 +1073,58 @@ void vm_init(VM* vm, uint8_t* code, char** strings, int strings_count, int argc,
     vm_define_native(vm, "flt", native_flt, 25);
     vm_define_native(vm, "rand", native_rand, 26);
     vm_define_native(vm, "seed", native_seed, 27);
+    vm_define_native(vm, "ffiLoad", native_ffiLoad, 28);
+    vm_define_native(vm, "ffiCall", native_ffiCall, 29);
+    vm_define_native(vm, "close", native_close, 30);
+    vm_define_native(vm, "json_stringify", native_json_stringify, 31);
+    vm_define_native(vm, "json_parse", native_json_parse, 32);
+    vm_define_native(vm, "httpGet", native_httpGet, 33);
+}
+
+typedef struct {
+    VM* vm;
+    Value callable;
+    int arg_count;
+    Value args[32];
+} ThreadArgs;
+
+static void* thread_routine(void* arg) {
+    ThreadArgs* targs = (ThreadArgs*)arg;
+    VM* vm = targs->vm;
+    
+    if (TYPE_KIND(targs->callable.type) == VAL_OBJ && targs->callable.as.obj->type == OBJ_NATIVE) {
+        ObjNative* native = (ObjNative*)targs->callable.as.obj;
+        native->function(vm, targs->arg_count, targs->args);
+    } else {
+        int32_t addr = (int32_t)targs->callable.as.i_val;
+        int current_offset = vm->frame_ptr * LOCALS_PER_FRAME;
+        CallFrame* frame = &vm->frames[vm->frame_ptr++];
+        frame->return_addr = -1;
+        frame->locals_offset = current_offset;
+        vm->ip = addr;
+        
+        for (int i = 0; i < targs->arg_count; i++) {
+            vm_push(vm, targs->args[i]);
+        }
+        
+        vm_run(vm);
+    }
+    
+    release(targs->callable);
+    for (int i = 0; i < targs->arg_count; i++) release(targs->args[i]);
+    
+    // Clean up locals
+    for (int i = 0; i < LOCALS_MAX; i++) {
+        release(vm->locals[i]);
+    }
+    // Clean up stack
+    for (int i = 0; i < vm->stack_ptr; i++) {
+        release(vm->stack[i]);
+    }
+
+    free(vm);
+    free(targs);
+    return NULL;
 }
 
 void vm_push(VM* vm, Value val) {
@@ -1078,6 +1480,7 @@ void vm_run(VM* vm) {
                     release(vm->locals[frame->locals_offset + i]);
                     vm->locals[frame->locals_offset + i] = (Value){VAL_VOID, {0}};
                 }
+                if (frame->return_addr == -1) return;
                 vm->ip = frame->return_addr;
                 break;
             }
@@ -1119,7 +1522,7 @@ void vm_run(VM* vm) {
                     char buf[2] = {s->chars[idx], '\0'};
                     ObjString* res = allocate_string(vm, buf, 1);
                     vm_push(vm, (Value){VAL_OBJ, {.obj = (HeapObject*)res}});
-                } else if (TYPE_KIND(obj.type) == VAL_OBJ && obj.as.obj->type == OBJ_MAP) {
+                } else if ((TYPE_KIND(obj.type) == VAL_OBJ || TYPE_KIND(obj.type) == VAL_MAP) && obj.as.obj->type == OBJ_MAP) {
                     ObjMap* map = (ObjMap*)obj.as.obj;
                     Value val = map_get(map, index);
                     if (TYPE_KIND(val.type) == VAL_VOID) {
@@ -1212,7 +1615,7 @@ void vm_run(VM* vm) {
                     release(array->items[idx]);
                     retain(val);
                     array->items[idx] = val;
-                } else if (TYPE_KIND(obj.type) == VAL_OBJ && obj.as.obj->type == OBJ_MAP) {
+                } else if ((TYPE_KIND(obj.type) == VAL_OBJ || TYPE_KIND(obj.type) == VAL_MAP) && obj.as.obj->type == OBJ_MAP) {
                     ObjMap* map = (ObjMap*)obj.as.obj;
                     map_set(map, index, val);
                 } else { 
@@ -1290,6 +1693,18 @@ void vm_run(VM* vm) {
                 }
                 break;
             }
+            case OP_CHECK_TYPE: {
+                uint8_t type_kind = vm->code[vm->ip++];
+                Value val = vm->stack[vm->stack_ptr - 1];
+                bool match = false;
+                int actual_kind = TYPE_KIND(val.type);
+                if (actual_kind == type_kind) match = true;
+                else if (type_kind == VAL_STR && actual_kind == VAL_OBJ && 
+                         val.as.obj != NULL && val.as.obj->type == OBJ_STRING) match = true;
+                
+                vm_push(vm, (Value){VAL_BOOL, {.b_val = match}});
+                break;
+            }
             case OP_IS_TRUTHY: {
                 Value val = vm_pop(vm);
                 bool truthy = false;
@@ -1324,12 +1739,12 @@ void vm_run(VM* vm) {
             }
             case OP_GET_ENUM_PAYLOAD: {
                 Value val = vm->stack[vm->stack_ptr - 1];
-                if (TYPE_KIND(val.type) == VAL_ENUM && val.as.obj->type == OBJ_ENUM) {
+                if (TYPE_KIND(val.type) == VAL_ENUM && val.as.obj != NULL && val.as.obj->type == OBJ_ENUM) {
                     ObjEnum* en = (ObjEnum*)val.as.obj;
                     retain(en->payload);
                     vm_push(vm, en->payload);
                 } else {
-                    vm_push(vm, (Value){VAL_VOID, {.i_val = 0}});
+                    vm_push(vm, val);
                 }
                 break;
             }
@@ -1358,6 +1773,89 @@ void vm_run(VM* vm) {
                     frame->return_addr = vm->ip; frame->locals_offset = current_offset;
                     vm->ip = addr;
                 } else { fprintf(stderr, "Can only invoke functions or natives. Type: %d\n", TYPE_KIND(callable.type)); exit(1); }
+                break;
+            }
+            case OP_GO: {
+                int arg_count = vm->code[vm->ip++];
+                Value callable = vm_pop(vm);
+                ThreadArgs* targs = malloc(sizeof(ThreadArgs));
+                targs->callable = callable;
+                targs->arg_count = arg_count;
+                for (int i = arg_count - 1; i >= 0; i--) {
+                    targs->args[i] = vm_pop(vm);
+                }
+                
+                VM* new_vm = malloc(sizeof(VM));
+                vm_init(new_vm, vm->code, vm->strings, vm->strings_count, vm->argc, vm->argv);
+                targs->vm = new_vm;
+                
+                pthread_t thread;
+                pthread_create(&thread, NULL, thread_routine, targs);
+                pthread_detach(thread);
+                break;
+            }
+            case OP_CHAN: {
+                Type type = (Type)read_int32(vm);
+                Value cap_val = vm_pop(vm);
+                int capacity = (int)cap_val.as.i_val;
+                release(cap_val);
+                ObjChan* chan = allocate_chan(vm, capacity);
+                vm_push(vm, (Value){type, {.obj = (HeapObject*)chan}});
+                break;
+            }
+            case OP_SEND: {
+                Value val = vm_pop(vm);
+                Value chan_val = vm_pop(vm);
+                ObjChan* chan = (ObjChan*)chan_val.as.obj;
+                
+                pthread_mutex_lock(&chan->mutex);
+                while (chan->count == chan->capacity && !chan->closed) {
+                    pthread_cond_wait(&chan->send_cond, &chan->mutex);
+                }
+                
+                if (chan->closed) {
+                    pthread_mutex_unlock(&chan->mutex);
+                    runtime_error(vm, "Send on closed channel");
+                    break;
+                }
+                
+                retain(val);
+                chan->buffer[chan->tail] = val;
+                chan->tail = (chan->tail + 1) % chan->capacity;
+                chan->count++;
+                
+                pthread_cond_signal(&chan->recv_cond);
+                pthread_mutex_unlock(&chan->mutex);
+                
+                release(chan_val); release(val);
+                break;
+            }
+            case OP_RECV: {
+                Value chan_val = vm_pop(vm);
+                ObjChan* chan = (ObjChan*)chan_val.as.obj;
+                
+                pthread_mutex_lock(&chan->mutex);
+                while (chan->count == 0 && !chan->closed) {
+                    pthread_cond_wait(&chan->recv_cond, &chan->mutex);
+                }
+                
+                if (chan->count == 0 && chan->closed) {
+                    pthread_mutex_unlock(&chan->mutex);
+                    vm_push(vm, (Value){VAL_VOID, {0}});
+                    release(chan_val);
+                    break;
+                }
+                
+                Value val = chan->buffer[chan->head];
+                chan->head = (chan->head + 1) % chan->capacity;
+                chan->count--;
+                
+                pthread_cond_signal(&chan->send_cond);
+                pthread_mutex_unlock(&chan->mutex);
+                
+                vm_push(vm, val);
+                release(val);
+                release(chan_val);
                 break;
             }
             default:

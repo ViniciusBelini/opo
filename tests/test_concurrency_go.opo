@@ -1,0 +1,8 @@
+<> -> void: worker [
+    "In worker" !!
+]
+
+<> -> void: main [
+    go worker()
+    "In main" !!
+]

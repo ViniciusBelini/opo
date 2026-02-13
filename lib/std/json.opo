@@ -1,0 +1,7 @@
+pub <val: any> -> str: stringify [
+    json_stringify(val)
+]
+
+pub <json: str> -> any: parse [
+    json_parse(json)
+]

@@ -2,9 +2,10 @@
 #define OPO_VM_H
 
 #include "common.h"
+#include <pthread.h>
 
 #define STACK_MAX 256
-#define LOCALS_PER_FRAME 32
+#define LOCALS_PER_FRAME 48
 #define FRAMES_MAX 64
 #define LOCALS_MAX (FRAMES_MAX * LOCALS_PER_FRAME)
 
@@ -49,5 +50,20 @@ void release(Value val);
 
 ObjString* allocate_string(VM* vm, const char* chars, int length);
 ObjArray* allocate_array(VM* vm);
+
+typedef struct {
+    HeapObject obj;
+    Value* buffer;
+    int capacity;
+    int count;
+    int head;
+    int tail;
+    pthread_mutex_t mutex;
+    pthread_cond_t send_cond;
+    pthread_cond_t recv_cond;
+    bool closed;
+} ObjChan;
+
+ObjChan* allocate_chan(VM* vm, int capacity);
 
 #endif

@@ -15,6 +15,7 @@ typedef enum {
     TOKEN_RBRACKET, // ]
     TOKEN_LBRACE,   // {
     TOKEN_RBRACE,   // }
+    TOKEN_L_ARROW,  // <-
     TOKEN_LPAREN,   // (
     TOKEN_RPAREN,   // )
     TOKEN_LANGLE,   // <
@@ -34,6 +35,7 @@ typedef enum {
     TOKEN_TYPE,
     TOKEN_PUB, TOKEN_IMP,
     TOKEN_TRY, TOKEN_CATCH, TOKEN_THROW,
+    TOKEN_GO, TOKEN_CHAN,
     TOKEN_EOF,
     TOKEN_ERROR
 } TokenType;

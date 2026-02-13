@@ -130,7 +130,15 @@ static TokenType identifier_type() {
             break;
         case 'p': return check_keyword(1, 2, "ub", TOKEN_PUB);
         case 'i': return check_keyword(1, 2, "mp", TOKEN_IMP);
-        case 'c': return check_keyword(1, 4, "atch", TOKEN_CATCH);
+        case 'g': return check_keyword(1, 1, "o", TOKEN_GO);
+        case 'c': 
+            if (lexer.current - lexer.start > 1) {
+                switch (lexer.start[1]) {
+                    case 'a': return check_keyword(2, 3, "tch", TOKEN_CATCH);
+                    case 'h': return check_keyword(2, 2, "an", TOKEN_CHAN);
+                }
+            }
+            break;
         case 'e': return check_keyword(1, 3, "num", TOKEN_ENUM);
         case 'm': return check_keyword(1, 4, "atch", TOKEN_MATCH);
         case 'n': return check_keyword(1, 3, "one", TOKEN_NONE);
@@ -166,7 +174,10 @@ Token lexer_next_token() {
         case '}': return make_token(TOKEN_RBRACE);
         case '(': return make_token(TOKEN_LPAREN);
         case ')': return make_token(TOKEN_RPAREN);
-        case '<': return match('=') ? make_token(TOKEN_LTE) : make_token(TOKEN_LANGLE);
+        case '<': 
+            if (match('=')) return make_token(TOKEN_LTE);
+            if (match('-')) return make_token(TOKEN_L_ARROW);
+            return make_token(TOKEN_LANGLE);
         case '>': return match('=') ? make_token(TOKEN_GTE) : make_token(TOKEN_RANGLE);
         case '+': return make_token(TOKEN_PLUS);
         case '-': return match('>') ? make_token(TOKEN_ARROW) : make_token(TOKEN_MINUS);

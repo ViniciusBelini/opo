@@ -1,0 +1,4 @@
+<> -> void: main [
+    10 => x: any
+    x => y: int
+]

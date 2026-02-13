@@ -1,0 +1,20 @@
+<ch: chan<int>> -> void: worker [
+    10 => i: int
+    i < 15 @ [
+        i !!
+        ch <- i
+        i + 1 => i
+    ]
+]
+
+<> -> void: main [
+    chan<int>(2) => ch: chan<int>
+    go worker(ch)
+    
+    0 => count: int
+    count < 5 @ [
+        "Received: " + str(<-ch) !!
+        count + 1 => count
+    ]
+    "Done" !!
+]

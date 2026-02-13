@@ -1,0 +1,10 @@
+<> -> void: main [
+    ffiLoad("") => libc: int
+    libc == 0 ? [
+        "Failed to load libc" !!
+    ] : [
+        "Calling puts via FFI:" !!
+        ffiCall(libc, "puts", "s", "i", "Hello from Opo FFI!") !!
+        "FFI Call complete." !!
+    ]
+]

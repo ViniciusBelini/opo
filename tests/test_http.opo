@@ -1,0 +1,7 @@
+"std/net" => net: imp
+
+<> -> void: main [
+    "Fetching google.com..." !!
+    net.get("https://www.google.com") => html: str
+    "Success! Fetched " + str(len(html)) + " characters." !!
+]

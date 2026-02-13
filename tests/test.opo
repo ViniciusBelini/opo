@@ -1,14 +1,10 @@
-<> -> int: test[
-	0 => i: int
-
-	i < 100 @ [
-		i+1 => i
-		^ i
-	]
-
-	^ 0
-]
+"std/json" => json: imp
 
 <> -> void: main[
-	test() !!
+    {"oi" => "Olá"} => js: {str: any}
+
+    json.stringify(js) => tst: str
+    json.parse(tst) => jsoso: any
+
+    println(typeOf(jsoso))
 ]

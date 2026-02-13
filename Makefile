@@ -7,10 +7,10 @@ TARGET = opo
 all: $(TARGET)
 
 $(TARGET): $(OBJ)
-	$(CC) $(CFLAGS) -o $@ $^ -lm
+	$(CC) $(CFLAGS) -o $@ $^ -lm -ldl -pthread $(shell pkg-config --libs libffi)
 
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(shell pkg-config --cflags libffi) -c $< -o $@
 
 clean:
 	rm -f $(OBJ) $(TARGET)

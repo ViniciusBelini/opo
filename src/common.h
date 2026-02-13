@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 
 typedef enum {
     OP_HALT,
@@ -52,7 +53,12 @@ typedef enum {
     OP_CHECK_VARIANT,
     OP_GET_ENUM_PAYLOAD,
     OP_EXTRACT_ENUM_PAYLOAD,
-    OP_IS_TRUTHY
+    OP_IS_TRUTHY,
+    OP_GO,
+    OP_CHAN,
+    OP_SEND,
+    OP_RECV,
+    OP_CHECK_TYPE
 } OpCode;
 
 typedef enum {
@@ -73,7 +79,8 @@ typedef enum {
     VAL_MAP,
     VAL_ERR,
     VAL_ANY,
-    VAL_ENUM
+    VAL_ENUM,
+    VAL_CHAN
 } ValueType;
 
 #define OPTION_ENUM_ID 0xFF
@@ -90,7 +97,8 @@ typedef enum {
     OBJ_STRUCT,
     OBJ_NATIVE,
     OBJ_MAP,
-    OBJ_ENUM
+    OBJ_ENUM,
+    OBJ_CHAN
 } ObjType;
 
 struct HeapObject {

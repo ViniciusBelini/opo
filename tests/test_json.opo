@@ -1,0 +1,15 @@
+"std/json" => json: imp
+
+<> -> void: main [
+    { "name" => "Opo" } => data: {str:any}
+    0.1 => data."version"
+    ["FFI", "Concurrency", "JSON"] => data."features"
+    
+    json.stringify(data) => s: str
+    "Stringified: " + s !!
+    
+    json.parse(s) => data2: any
+    "Parsed: " + str(data2) !!
+    
+    typeOf(data2) !!
+]

@@ -97,14 +97,17 @@ int main(int argc, char* argv[]) {
     Chunk* chunk = compiler_compile(source, base_dir, stdlib_dir);
     free(source);
 
-    if (chunk == NULL) return 65;
+    if (chunk == NULL) {
+        return 65;
+    }
 
     VM vm;
     vm_init(&vm, chunk->code, chunk->strings, chunk->strings_count, argc, argv);
     vm_run(&vm);
 
-    // Clean up
-    chunk_free(chunk);
+    // In Go-style concurrency, when main returns, the program exits.
+    // If we return and call chunk_free, other threads might still be running and will crash.
+    exit(0);
 
     return 0;
 }
