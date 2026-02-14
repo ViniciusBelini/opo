@@ -18,14 +18,14 @@ Converts a value to its string representation.
 ### `int(val)`
 Converts a string or float to an integer.
 - Input: `str`, `flt`, or `int`
-- Output: `int`
-- Note: Generates a runtime error if the string format is invalid or the type is not supported.
+- Output: `int!` (Result)
+- Note: Returns `err` if the string format is invalid or the type is not supported.
 
 ### `flt(val)`
 Converts a string or integer to a float.
 - Input: `str`, `int`, or `flt`
-- Output: `flt`
-- Note: Generates a runtime error if the string format is invalid or the type is not supported.
+- Output: `flt!` (Result)
+- Note: Returns `err` if the string format is invalid or the type is not supported.
 
 ### `typeOf(val)`
 Returns the type of a value as a string.
@@ -53,12 +53,12 @@ Reads a line of text from stdin.
 ### `readFile(path)`
 Reads the entire content of a file into a string.
 - Input: `str` (path)
-- Output: `str` (content)
+- Output: `str!` (Result containing content or error message)
 
 ### `writeFile(path, content)`
 Writes a string to a file.
 - Input: `str` (path), `str` (content)
-- Output: `bol` (success)
+- Output: `bol!` (Result containing success bol or error message)
 
 ## System
 
@@ -87,7 +87,7 @@ Returns the CPU time used by the program since it started, in seconds.
 ### `system(cmd)`
 Executes a system command.
 - Input: `str`
-- Output: `int` (exit code of the command)
+- Output: `int!` (Result containing exit code or error message)
 
 ### `keys(map)`
 Returns an array containing all keys in a map.

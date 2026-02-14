@@ -12,11 +12,17 @@
 
 <url: str> -> void: install [
     "Downloading " + url + "..." !!
-    system("curl -s -O " + url) => res: int
-    res == 0 ? [
-        "Package installed successfully." !!
-    ] : [
-        "Failed to download package. Exit code: " + str(res) !!
+    match system("curl -s -O " + url) [
+        ok(res) [
+            res == 0 ? [
+                "Package installed successfully." !!
+            ] : [
+                "Failed to download package. Exit code: " + str(res) !!
+            ]
+        ]
+        err(e) [
+            "Error: " + e !!
+        ]
     ]
 ]
 

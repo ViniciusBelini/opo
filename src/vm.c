@@ -7,6 +7,7 @@
 #include <ctype.h>
 #include <regex.h>
 #include <unistd.h>
+#include <errno.h>
 #include <dirent.h>
 #include <dlfcn.h>
 #include <ffi.h>
@@ -178,6 +179,32 @@ static uint32_t hash_value(Value v) {
 static bool is_string(Value v) {
     int kind = TYPE_KIND(v.type);
     return kind == VAL_STR || (kind == VAL_OBJ && v.as.obj != NULL && v.as.obj->type == OBJ_STRING);
+}
+
+static Value wrap_ok(VM* vm, Value val, Type inner_type) {
+    ObjEnum* en = malloc(sizeof(ObjEnum));
+    en->obj.type = OBJ_ENUM;
+    en->obj.ref_count = 0;
+    en->variant_index = 1; // ok
+    en->has_payload = true;
+    en->payload = val;
+    retain(val);
+    en->enum_name = strdup("Result");
+    en->variant_name = strdup("ok");
+    return (Value){MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, TYPE_KIND(inner_type)), {.obj = (HeapObject*)en}};
+}
+
+static Value wrap_err(VM* vm, const char* msg, Type inner_type) {
+    ObjEnum* en = malloc(sizeof(ObjEnum));
+    en->obj.type = OBJ_ENUM;
+    en->obj.ref_count = 0;
+    en->variant_index = 0; // err
+    en->has_payload = true;
+    en->payload = (Value){VAL_OBJ, {.obj = (HeapObject*)allocate_string(vm, msg, (int)strlen(msg))}};
+    retain(en->payload);
+    en->enum_name = strdup("Result");
+    en->variant_name = strdup("err");
+    return (Value){MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, TYPE_KIND(inner_type)), {.obj = (HeapObject*)en}};
 }
 
 static const char* get_string_ptr(VM* vm, Value v) {
@@ -373,10 +400,10 @@ static Value native_str(VM* vm, int arg_count, Value* args) {
 }
 
 static Value native_readFile(VM* vm, int arg_count, Value* args) {
-    if (arg_count != 1 || !is_string(args[0])) return (Value){VAL_VOID, {0}};
+    if (arg_count != 1 || !is_string(args[0])) return wrap_err(vm, "Invalid argument to readFile", VAL_STR);
     const char* path = get_string_ptr(vm, args[0]);
     FILE* file = fopen(path, "rb");
-    if (file == NULL) return (Value){VAL_VOID, {0}};
+    if (file == NULL) return wrap_err(vm, strerror(errno), VAL_STR);
     fseek(file, 0L, SEEK_END);
     long size = ftell(file);
     rewind(file);
@@ -387,18 +414,18 @@ static Value native_readFile(VM* vm, int arg_count, Value* args) {
     fclose(file);
     ObjString* s = allocate_string(vm, buffer, (int)size);
     free(buffer);
-    return (Value){VAL_OBJ, {.obj = (HeapObject*)s}};
+    return wrap_ok(vm, (Value){VAL_OBJ, {.obj = (HeapObject*)s}}, VAL_STR);
 }
 
 static Value native_writeFile(VM* vm, int arg_count, Value* args) {
-    if (arg_count != 2 || !is_string(args[0]) || !is_string(args[1])) return (Value){VAL_VOID, {0}};
+    if (arg_count != 2 || !is_string(args[0]) || !is_string(args[1])) return wrap_err(vm, "Invalid arguments to writeFile", VAL_BOOL);
     const char* path = get_string_ptr(vm, args[0]);
     const char* content = get_string_ptr(vm, args[1]);
     FILE* file = fopen(path, "wb");
-    if (file == NULL) return (Value){VAL_BOOL, {.b_val = false}};
+    if (file == NULL) return wrap_err(vm, strerror(errno), VAL_BOOL);
     fwrite(content, 1, strlen(content), file);
     fclose(file);
-    return (Value){VAL_BOOL, {.b_val = true}};
+    return wrap_ok(vm, (Value){VAL_BOOL, {.b_val = true}}, VAL_BOOL);
 }
 
 static Value native_args(VM* vm, int arg_count, Value* args) {
@@ -417,46 +444,40 @@ static Value native_args(VM* vm, int arg_count, Value* args) {
 
 static Value native_int(VM* vm, int arg_count, Value* args) {
     if (arg_count != 1) {
-        runtime_error(vm, "int() expects 1 argument, got %d", arg_count);
-        return (Value){VAL_VOID, {0}};
+        return wrap_err(vm, "int() expects 1 argument", VAL_INT);
     }
     Value val = args[0];
-    if (TYPE_KIND(val.type) == VAL_INT) return val;
-    if (TYPE_KIND(val.type) == VAL_FLT) return (Value){VAL_INT, {.i_val = (int64_t)val.as.f_val}};
+    if (TYPE_KIND(val.type) == VAL_INT) return wrap_ok(vm, val, VAL_INT);
+    if (TYPE_KIND(val.type) == VAL_FLT) return wrap_ok(vm, (Value){VAL_INT, {.i_val = (int64_t)val.as.f_val}}, VAL_INT);
     if (is_string(val)) {
         char* endptr;
         const char* str = get_string_ptr(vm, val);
         int64_t res = strtoll(str, &endptr, 10);
         if (*str == '\0' || *endptr != '\0') {
-            runtime_error(vm, "Invalid format for int(): '%s'", str);
-            return (Value){VAL_VOID, {0}};
+            return wrap_err(vm, "Invalid format for int()", VAL_INT);
         }
-        return (Value){VAL_INT, {.i_val = res}};
+        return wrap_ok(vm, (Value){VAL_INT, {.i_val = res}}, VAL_INT);
     }
-    runtime_error(vm, "Cannot convert type to int");
-    return (Value){VAL_VOID, {0}};
+    return wrap_err(vm, "Cannot convert type to int", VAL_INT);
 }
 
 static Value native_flt(VM* vm, int arg_count, Value* args) {
     if (arg_count != 1) {
-        runtime_error(vm, "flt() expects 1 argument, got %d", arg_count);
-        return (Value){VAL_VOID, {0}};
+        return wrap_err(vm, "flt() expects 1 argument", VAL_FLT);
     }
     Value val = args[0];
-    if (TYPE_KIND(val.type) == VAL_FLT) return val;
-    if (TYPE_KIND(val.type) == VAL_INT) return (Value){VAL_FLT, {.f_val = (double)val.as.i_val}};
+    if (TYPE_KIND(val.type) == VAL_FLT) return wrap_ok(vm, val, VAL_FLT);
+    if (TYPE_KIND(val.type) == VAL_INT) return wrap_ok(vm, (Value){VAL_FLT, {.f_val = (double)val.as.i_val}}, VAL_FLT);
     if (is_string(val)) {
         char* endptr;
         const char* str = get_string_ptr(vm, val);
         double res = strtod(str, &endptr);
         if (*str == '\0' || *endptr != '\0') {
-            runtime_error(vm, "Invalid format for flt(): '%s'", str);
-            return (Value){VAL_VOID, {0}};
+            return wrap_err(vm, "Invalid format for flt()", VAL_FLT);
         }
-        return (Value){VAL_FLT, {.f_val = res}};
+        return wrap_ok(vm, (Value){VAL_FLT, {.f_val = res}}, VAL_FLT);
     }
-    runtime_error(vm, "Cannot convert type to flt");
-    return (Value){VAL_VOID, {0}};
+    return wrap_err(vm, "Cannot convert type to flt", VAL_FLT);
 }
 
 static Value native_print(VM* vm, int arg_count, Value* args) {
@@ -505,9 +526,10 @@ static Value native_clock(VM* vm, int arg_count, Value* args) {
 }
 
 static Value native_system(VM* vm, int arg_count, Value* args) {
-    if (arg_count != 1 || !is_string(args[0])) return (Value){VAL_INT, {.i_val = -1}};
+    if (arg_count != 1 || !is_string(args[0])) return wrap_err(vm, "Invalid argument to system", VAL_INT);
     int res = system(get_string_ptr(vm, args[0]));
-    return (Value){VAL_INT, {.i_val = res}};
+    if (res == -1) return wrap_err(vm, strerror(errno), VAL_INT);
+    return wrap_ok(vm, (Value){VAL_INT, {.i_val = res}}, VAL_INT);
 }
 
 static Value native_keys(VM* vm, int arg_count, Value* args) {
@@ -632,6 +654,9 @@ static char* type_to_string(Type t, char* buf) {
             if (sub == OPTION_ENUM_ID) {
                 char key_buf[64];
                 sprintf(buf, "%s?", type_to_string(key, key_buf));
+            } else if (sub == RESULT_ENUM_ID) {
+                char key_buf[64];
+                sprintf(buf, "%s!", type_to_string(key, key_buf));
             } else {
                 strcpy(buf, "enum");
             }
@@ -694,23 +719,20 @@ static Value native_seed(VM* vm, int arg_count, Value* args) {
 
 static Value native_ffiLoad(VM* vm, int arg_count, Value* args) {
     if (arg_count != 1 || !is_string(args[0])) {
-        runtime_error(vm, "ffiLoad() expects 1 string argument");
-        return (Value){VAL_VOID, {0}};
+        return wrap_err(vm, "ffiLoad() expects 1 string argument", VAL_INT);
     }
     const char* path = get_string_ptr(vm, args[0]);
     if (strlen(path) == 0) path = NULL;
     void* handle = dlopen(path, RTLD_LAZY | RTLD_GLOBAL);
     if (!handle) {
-        runtime_error(vm, "Could not load library: %s", dlerror());
-        return (Value){VAL_VOID, {0}};
+        return wrap_err(vm, dlerror(), VAL_INT);
     }
-    return (Value){VAL_INT, {.i_val = (int64_t)handle}};
+    return wrap_ok(vm, (Value){VAL_INT, {.i_val = (int64_t)handle}}, VAL_INT);
 }
 
 static Value native_ffiCall(VM* vm, int arg_count, Value* args) {
     if (arg_count < 4) {
-        runtime_error(vm, "ffiCall() expects at least 4 arguments");
-        return (Value){VAL_VOID, {0}};
+        return wrap_err(vm, "ffiCall() expects at least 4 arguments", VAL_ANY);
     }
 
     void* handle = (void*)args[0].as.i_val;
@@ -720,14 +742,12 @@ static Value native_ffiCall(VM* vm, int arg_count, Value* args) {
 
     void* func = dlsym(handle, name);
     if (!func) {
-        runtime_error(vm, "Could not find symbol: %s", name);
-        return (Value){VAL_VOID, {0}};
+        return wrap_err(vm, dlerror(), VAL_ANY);
     }
 
-    int n_args = strlen(arg_types_str);
+    int n_args = (int)strlen(arg_types_str);
     if (arg_count - 4 != n_args) {
-        runtime_error(vm, "ffiCall(): expected %d arguments, got %d", n_args, arg_count - 4);
-        return (Value){VAL_VOID, {0}};
+        return wrap_err(vm, "Wrong number of FFI arguments", VAL_ANY);
     }
 
     ffi_cif cif;
@@ -757,8 +777,7 @@ static Value native_ffiCall(VM* vm, int arg_count, Value* args) {
                 arg_values[i] = &args[4 + i].as.i_val;
                 break;
             default:
-                runtime_error(vm, "Unknown FFI argument type: %c", arg_types_str[i]);
-                return (Value){VAL_VOID, {0}};
+                return wrap_err(vm, "Unknown FFI argument type", VAL_ANY);
         }
     }
 
@@ -770,13 +789,11 @@ static Value native_ffiCall(VM* vm, int arg_count, Value* args) {
         case 's': rtype = &ffi_type_pointer; break;
         case 'p': rtype = &ffi_type_pointer; break;
         default:
-            runtime_error(vm, "Unknown FFI return type: %c", ret_type_str[0]);
-            return (Value){VAL_VOID, {0}};
+            return wrap_err(vm, "Unknown FFI return type", VAL_ANY);
     }
 
     if (ffi_prep_cif(&cif, FFI_DEFAULT_ABI, n_args, rtype, arg_types) != FFI_OK) {
-        runtime_error(vm, "ffi_prep_cif failed");
-        return (Value){VAL_VOID, {0}};
+        return wrap_err(vm, "ffi_prep_cif failed", VAL_ANY);
     }
 
     union {
@@ -788,16 +805,16 @@ static Value native_ffiCall(VM* vm, int arg_count, Value* args) {
     ffi_call(&cif, FFI_FN(func), &result, arg_values);
 
     switch (ret_type_str[0]) {
-        case 'v': return (Value){VAL_VOID, {0}};
-        case 'i': return (Value){VAL_INT, {.i_val = result.i}};
-        case 'f': return (Value){VAL_FLT, {.f_val = result.f}};
+        case 'v': return wrap_ok(vm, (Value){VAL_VOID, {0}}, VAL_ANY);
+        case 'i': return wrap_ok(vm, (Value){VAL_INT, {.i_val = result.i}}, VAL_ANY);
+        case 'f': return wrap_ok(vm, (Value){VAL_FLT, {.f_val = result.f}}, VAL_ANY);
         case 's': {
-            if (result.p == NULL) return (Value){VAL_VOID, {0}};
-            ObjString* s = allocate_string(vm, (char*)result.p, strlen((char*)result.p));
-            return (Value){VAL_OBJ, {.obj = (HeapObject*)s}};
+            if (result.p == NULL) return wrap_ok(vm, (Value){VAL_VOID, {0}}, VAL_ANY);
+            ObjString* s = allocate_string(vm, (char*)result.p, (int)strlen((char*)result.p));
+            return wrap_ok(vm, (Value){VAL_OBJ, {.obj = (HeapObject*)s}}, VAL_ANY);
         }
-        case 'p': return (Value){VAL_INT, {.i_val = (int64_t)result.p}};
-        default: return (Value){VAL_VOID, {0}};
+        case 'p': return wrap_ok(vm, (Value){VAL_INT, {.i_val = (int64_t)result.p}}, VAL_ANY);
+        default: return wrap_ok(vm, (Value){VAL_VOID, {0}}, VAL_ANY);
     }
 }
 
@@ -983,21 +1000,23 @@ static Value native_fileExists(VM* vm, int arg_count, Value* args) {
 
 static Value native_removeFile(VM* vm, int arg_count, Value* args) {
     if (arg_count != 1 || !is_string(args[0])) {
-        runtime_error(vm, "removeFile() expects 1 string argument");
-        return (Value){VAL_VOID, {0}};
+        return wrap_err(vm, "removeFile() expects 1 string argument", VAL_BOOL);
     }
     const char* path = get_string_ptr(vm, args[0]);
-    return (Value){VAL_BOOL, {.b_val = remove(path) == 0}};
+    if (remove(path) == 0) {
+        return wrap_ok(vm, (Value){VAL_BOOL, {.b_val = true}}, VAL_BOOL);
+    } else {
+        return wrap_err(vm, strerror(errno), VAL_BOOL);
+    }
 }
 
 static Value native_listDir(VM* vm, int arg_count, Value* args) {
     if (arg_count != 1 || !is_string(args[0])) {
-        runtime_error(vm, "listDir() expects 1 string argument");
-        return (Value){VAL_VOID, {0}};
+        return wrap_err(vm, "listDir() expects 1 string argument", VAL_OBJ);
     }
     const char* path = get_string_ptr(vm, args[0]);
     DIR* d = opendir(path);
-    if (!d) return (Value){VAL_VOID, {0}};
+    if (!d) return wrap_err(vm, strerror(errno), VAL_OBJ);
 
     ObjArray* array = allocate_array(vm);
     struct dirent* dir;
@@ -1013,7 +1032,7 @@ static Value native_listDir(VM* vm, int arg_count, Value* args) {
         array->items[array->count++] = val;
     }
     closedir(d);
-    return (Value){MAKE_TYPE(VAL_OBJ, VAL_STR, 0), {.obj = (HeapObject*)array}};
+    return wrap_ok(vm, (Value){MAKE_TYPE(VAL_OBJ, VAL_STR, 0), {.obj = (HeapObject*)array}}, VAL_OBJ);
 }
 
 static Value native_regexMatch(VM* vm, int arg_count, Value* args) {
@@ -1049,16 +1068,14 @@ static Value native_regexMatch(VM* vm, int arg_count, Value* args) {
 
 static Value native_httpGet(VM* vm, int arg_count, Value* args) {
     if (arg_count != 1 || !is_string(args[0])) {
-        runtime_error(vm, "httpGet() expects 1 string argument");
-        return (Value){VAL_VOID, {0}};
+        return wrap_err(vm, "httpGet() expects 1 string argument", VAL_STR);
     }
     const char* url = get_string_ptr(vm, args[0]);
     
     // Safety check for URL: avoid command injection by only allowing certain characters
     for (const char* c = url; *c; c++) {
         if (!isalnum(*c) && !strchr(":/._-?&=%#+", *c)) {
-            runtime_error(vm, "Insecure URL character: '%c'", *c);
-            return (Value){VAL_VOID, {0}};
+            return wrap_err(vm, "Insecure URL character", VAL_STR);
         }
     }
 
@@ -1066,7 +1083,7 @@ static Value native_httpGet(VM* vm, int arg_count, Value* args) {
     snprintf(cmd, sizeof(cmd), "curl -s -L '%s'", url);
     
     FILE* fp = popen(cmd, "r");
-    if (fp == NULL) return (Value){VAL_VOID, {0}};
+    if (fp == NULL) return wrap_err(vm, "Failed to execute curl", VAL_STR);
     
     char* result = malloc(1024 * 64); // 64KB for now
     size_t total_read = 0;
@@ -1082,22 +1099,29 @@ static Value native_httpGet(VM* vm, int arg_count, Value* args) {
         memcpy(result + total_read, chunk, chunk_len);
         total_read += chunk_len;
     }
-    pclose(fp);
+    int status = pclose(fp);
+    if (status != 0) {
+        free(result);
+        return wrap_err(vm, "curl failed", VAL_STR);
+    }
     result[total_read] = '\0';
     
     ObjString* s = allocate_string(vm, result, (int)total_read);
     free(result);
-    return (Value){VAL_OBJ, {.obj = (HeapObject*)s}};
+    return wrap_ok(vm, (Value){VAL_OBJ, {.obj = (HeapObject*)s}}, VAL_STR);
 }
 
 static Value native_json_parse(VM* vm, int arg_count, Value* args) {
     if (arg_count != 1 || !is_string(args[0])) {
-        runtime_error(vm, "json_parse() expects 1 string argument");
-        return (Value){VAL_VOID, {0}};
+        return wrap_err(vm, "json_parse() expects 1 string argument", VAL_ANY);
     }
     const char* json = get_string_ptr(vm, args[0]);
     const char* p = json;
-    return parse_value(vm, &p);
+    Value res = parse_value(vm, &p);
+    if (TYPE_KIND(res.type) == VAL_VOID && *p != '\0') {
+        return wrap_err(vm, "JSON parse error", VAL_ANY);
+    }
+    return wrap_ok(vm, res, VAL_ANY);
 }
 
 static Value native_close(VM* vm, int arg_count, Value* args) {
@@ -1844,7 +1868,7 @@ void vm_run(VM* vm) {
                 else if (kind == VAL_ENUM) {
                     if (val.as.obj->type == OBJ_ENUM) {
                         ObjEnum* en = (ObjEnum*)val.as.obj;
-                        if (TYPE_SUB(val.type) == OPTION_ENUM_ID) {
+                        if (TYPE_SUB(val.type) == OPTION_ENUM_ID || TYPE_SUB(val.type) == RESULT_ENUM_ID) {
                             truthy = (en->variant_index != 0);
                         } else {
                             truthy = true;

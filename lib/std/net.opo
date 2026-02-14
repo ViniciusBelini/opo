@@ -1,3 +1,3 @@
-pub <url: str> -> str: get [
+pub <url: str> -> str!: get [
     httpGet(url)
 ]

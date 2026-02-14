@@ -2,9 +2,9 @@
 
 Opo provides simple HTTP client support through the `std/net` module.
 
-## `net.get(url: str) -> str`
+## `net.get(url: str) -> str!`
 
-Performs an HTTP GET request and returns the response body as a string.
+Performs an HTTP GET request and returns a `Result` containing the response body as a string.
 
 ### Example
 
@@ -12,8 +12,10 @@ Performs an HTTP GET request and returns the response body as a string.
 "std/net" => net: imp
 
 <> -> void: main [
-    net.get("https://api.github.com/zen") => zen: str
-    "GitHub says: " + zen !!
+    match net.get("https://api.github.com/zen") [
+        ok(zen) [ "GitHub says: " + zen !! ]
+        err(e) [ "Failed to fetch: " + e !! ]
+    ]
 ]
 ```
 

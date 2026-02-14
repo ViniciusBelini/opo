@@ -268,9 +268,13 @@ static bool is_assignable(Type expected, Type actual) {
         }
     }
 
-    // Enum/Option compatibility
+    // Enum/Option/Result compatibility
     if (TYPE_KIND(expected) == VAL_ENUM && TYPE_KIND(actual) == VAL_ENUM) {
         if (TYPE_SUB(expected) == OPTION_ENUM_ID && TYPE_SUB(actual) == OPTION_ENUM_ID) {
+            if (TYPE_KEY(expected) == VAL_ANY || TYPE_KEY(actual) == VAL_ANY) return true;
+            return TYPE_KEY(expected) == TYPE_KEY(actual);
+        }
+        if (TYPE_SUB(expected) == RESULT_ENUM_ID && TYPE_SUB(actual) == RESULT_ENUM_ID) {
             if (TYPE_KEY(expected) == VAL_ANY || TYPE_KEY(actual) == VAL_ANY) return true;
             return TYPE_KEY(expected) == TYPE_KEY(actual);
         }
@@ -418,6 +422,14 @@ static Type parse_type() {
             } else {
                 type = MAKE_TYPE(VAL_ENUM, OPTION_ENUM_ID, VAL_ANY);
             }
+        } else if (t.length == 6 && memcmp(t.start, "Result", 6) == 0) {
+            if (match(TOKEN_LANGLE)) {
+                Type inner = parse_type();
+                consume(TOKEN_RANGLE, "Expect '>' after Result type parameter.");
+                type = MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, TYPE_KIND(inner));
+            } else {
+                type = MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, VAL_ANY);
+            }
         } else {
             bool found = false;
             for (int i = 0; i < current_compiler->struct_count; i++) {
@@ -445,8 +457,14 @@ static Type parse_type() {
         }
     }
 
-    while (match(TOKEN_QUESTION)) {
-        type = MAKE_TYPE(VAL_ENUM, OPTION_ENUM_ID, TYPE_KIND(type));
+    while (true) {
+        if (match(TOKEN_QUESTION)) {
+            type = MAKE_TYPE(VAL_ENUM, OPTION_ENUM_ID, TYPE_KIND(type));
+        } else if (match(TOKEN_BANG)) {
+            type = MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, TYPE_KIND(type));
+        } else {
+            break;
+        }
     }
 
     return type;
@@ -632,6 +650,9 @@ static void map_literal() {
 static void dot() {
     Type lhs_type = type_pop();
     if (match(TOKEN_INT)) {
+        if (TYPE_KIND(lhs_type) == VAL_ANY) {
+            error_at(&parser.previous, "Cannot index 'any'. Match it first.");
+        }
         if (TYPE_KIND(lhs_type) == VAL_MAP && TYPE_KEY(lhs_type) != VAL_INT && TYPE_KEY(lhs_type) != VAL_ANY) {
             error_at(&parser.previous, "Map key type mismatch.");
         }
@@ -639,8 +660,12 @@ static void dot() {
         emit_int(idx);
         emit_byte(OP_INDEX);
         if (TYPE_KIND(lhs_type) == VAL_OBJ || TYPE_KIND(lhs_type) == VAL_MAP) type_push(TYPE_SUB(lhs_type));
+        else if (TYPE_KIND(lhs_type) == VAL_STR) type_push(VAL_STR);
         else type_push(VAL_ANY);
     } else if (match(TOKEN_STR)) {
+        if (TYPE_KIND(lhs_type) == VAL_ANY) {
+            error_at(&parser.previous, "Cannot index 'any'. Match it first.");
+        }
         if (TYPE_KIND(lhs_type) == VAL_MAP && TYPE_KEY(lhs_type) != VAL_STR && TYPE_KEY(lhs_type) != VAL_ANY) {
             error_at(&parser.previous, "Map key type mismatch.");
         }
@@ -648,8 +673,12 @@ static void dot() {
         emit_bytes(OP_PUSH_STR, (uint8_t)idx);
         emit_byte(OP_INDEX);
         if (TYPE_KIND(lhs_type) == VAL_MAP) type_push(TYPE_SUB(lhs_type));
+        else if (TYPE_KIND(lhs_type) == VAL_STR) type_push(VAL_STR);
         else type_push(VAL_ANY);
     } else if (match(TOKEN_LPAREN)) {
+        if (TYPE_KIND(lhs_type) == VAL_ANY) {
+            error_at(&parser.previous, "Cannot index 'any'. Match it first.");
+        }
         expression();
         consume(TOKEN_RPAREN, "Expect ')' after expression in dot access.");
         Type idx_type = type_pop();
@@ -658,6 +687,7 @@ static void dot() {
         }
         emit_byte(OP_INDEX);
         if (TYPE_KIND(lhs_type) == VAL_OBJ || TYPE_KIND(lhs_type) == VAL_MAP) type_push(TYPE_SUB(lhs_type));
+        else if (TYPE_KIND(lhs_type) == VAL_STR) type_push(VAL_STR);
         else type_push(VAL_ANY);
     } else {
         if (parser.current.type != TOKEN_ID && parser.current.type != TOKEN_SOME) {
@@ -692,6 +722,14 @@ static void dot() {
                     variant_idx = 1;
                     payload_type = MAKE_TYPE(TYPE_KEY(lhs_type), 0, 0);
                 }
+            } else if (enum_id == RESULT_ENUM_ID) {
+                if (name.length == 2 && memcmp(name.start, "ok", 2) == 0) {
+                    variant_idx = 1;
+                    payload_type = MAKE_TYPE(TYPE_KEY(lhs_type), 0, 0);
+                } else if (name.length == 3 && memcmp(name.start, "err", 3) == 0) {
+                    variant_idx = 0;
+                    payload_type = VAL_STR;
+                }
             } else {
                 EnumDef* ed = &current_compiler->enums[enum_id];
                 for (int v = 0; v < ed->variant_count; v++) {
@@ -716,12 +754,16 @@ static void dot() {
                 error_at(&name, "Unknown Enum variant.");
             }
         } else {
+            if (TYPE_KIND(lhs_type) == VAL_ANY) {
+                error_at(&name, "Cannot perform member access or indexing on 'any'. Match it first.");
+            }
             // Try as a variable for dynamic indexing
             int arg = resolve_local(current_compiler, &name);
             if (arg != -1) {
                 emit_bytes(OP_LOAD, (uint8_t)arg);
                 emit_byte(OP_INDEX);
                 if (TYPE_KIND(lhs_type) == VAL_OBJ || TYPE_KIND(lhs_type) == VAL_MAP) type_push(TYPE_SUB(lhs_type));
+                else if (TYPE_KIND(lhs_type) == VAL_STR) type_push(VAL_STR);
                 else type_push(VAL_ANY);
             } else {
                 error_at(&name, "Unknown struct field or index variable.");
@@ -775,6 +817,39 @@ static void some_expr() {
     emit_byte(OP_ENUM_VARIANT);
     emit_int32(type);
     emit_byte(1); // some is variant 1
+    emit_byte(1); // has payload
+    
+    type_push(type);
+}
+
+static void ok_expr() {
+    consume(TOKEN_LPAREN, "Expect '(' after 'ok'.");
+    expression();
+    Type val_type = type_pop();
+    consume(TOKEN_RPAREN, "Expect ')' after 'ok' argument.");
+    
+    Type type = MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, TYPE_KIND(val_type));
+    emit_byte(OP_ENUM_VARIANT);
+    emit_int32(type);
+    emit_byte(1); // ok is variant 1
+    emit_byte(1); // has payload
+    
+    type_push(type);
+}
+
+static void err_expr() {
+    consume(TOKEN_LPAREN, "Expect '(' after 'err'.");
+    expression();
+    Type err_type = type_pop();
+    if (TYPE_KIND(err_type) != VAL_STR && TYPE_KIND(err_type) != VAL_ANY) {
+        error_at(&parser.previous, "Error message must be a string.");
+    }
+    consume(TOKEN_RPAREN, "Expect ')' after 'err' argument.");
+    
+    Type type = MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, VAL_ANY);
+    emit_byte(OP_ENUM_VARIANT);
+    emit_int32(type);
+    emit_byte(0); // err is variant 0
     emit_byte(1); // has payload
     
     type_push(type);
@@ -838,6 +913,9 @@ static void variable() {
     if (arg != -1) {
         Type type = current_compiler->locals[arg].type;
         if (match(TOKEN_LPAREN)) {
+            if (TYPE_KIND(type) == VAL_ANY) {
+                error_at(&name, "Cannot call a value of type 'any'. Match it to a function type first.");
+            }
             int arg_count = 0;
             if (parser.current.type != TOKEN_RPAREN) {
                 do {
@@ -1155,6 +1233,9 @@ static void assignment() {
         int arg = resolve_local(current_compiler, &name);
         if (arg == -1) error_at(&name, "Undefined object.");
         Type lhs_type = current_compiler->locals[arg].type;
+        if (TYPE_KIND(lhs_type) == VAL_ANY) {
+            error_at(&name, "Cannot assign to member/index of 'any'. Match it first.");
+        }
         emit_bytes(OP_LOAD, (uint8_t)arg);
         Type val_type = type_pop();
         if (match(TOKEN_INT)) {
@@ -1324,6 +1405,8 @@ ParseRule rules[] = {
     [TOKEN_THROW]     = {throw_op, NULL,       PREC_NONE},
     [TOKEN_SOME]      = {some_expr, NULL,      PREC_NONE},
     [TOKEN_NONE]      = {none_expr, NULL,      PREC_NONE},
+    [TOKEN_OK]        = {ok_expr,   NULL,      PREC_NONE},
+    [TOKEN_ERR]       = {err_expr,  NULL,      PREC_NONE},
     [TOKEN_CHAN]      = {chan_expr, NULL,      PREC_NONE},
     [TOKEN_ENUM]      = {NULL,     NULL,       PREC_NONE},
     [TOKEN_MATCH]     = {NULL,     NULL,       PREC_NONE},
@@ -1645,6 +1728,14 @@ static void statement() {
                 } else {
                     error_at(&variant_token, "Expected 'some' or 'none' for Option match.");
                 }
+            } else if (enum_id == RESULT_ENUM_ID) {
+                if (variant_token.length == 2 && memcmp(variant_token.start, "ok", 2) == 0) {
+                    v_idx = 1;
+                } else if (variant_token.length == 3 && memcmp(variant_token.start, "err", 3) == 0) {
+                    v_idx = 0;
+                } else {
+                    error_at(&variant_token, "Expected 'ok' or 'err' for Result match.");
+                }
             } else {
                 for (int i = 0; i < ed->variant_count; i++) {
                     if (ed->variants[i].length == variant_token.length &&
@@ -1677,6 +1768,8 @@ static void statement() {
                     if (any_target_type == VAL_VOID && has_binding) error_at(&variant_token, "'void' variant cannot have a payload.");
                 } else if (enum_id == OPTION_ENUM_ID) {
                     if (v_idx != 1) error_at(&variant_token, "Only 'some' variant can have a payload.");
+                } else if (enum_id == RESULT_ENUM_ID) {
+                    // Both 'ok' and 'err' have payloads
                 } else {
                     if (!ed->has_payload[v_idx]) error_at(&variant_token, "Variant does not have a payload.");
                 }
@@ -1721,6 +1814,9 @@ static void statement() {
                     p_type = any_target_type;
                 } else if (enum_id == OPTION_ENUM_ID) {
                     p_type = MAKE_TYPE(TYPE_KEY(value_type), 0, 0);
+                } else if (enum_id == RESULT_ENUM_ID) {
+                    if (v_idx == 1) p_type = MAKE_TYPE(TYPE_KEY(value_type), 0, 0);
+                    else p_type = VAL_STR;
                 } else {
                     p_type = ed->payload_types[v_idx];
                 }
@@ -1758,6 +1854,8 @@ static void statement() {
         if (!is_any) {
             if (enum_id == OPTION_ENUM_ID) {
                 if (covered_count < 2) error_at(&parser.previous, "Match not exhaustive. Missing 'some' or 'none'.");
+            } else if (enum_id == RESULT_ENUM_ID) {
+                if (covered_count < 2) error_at(&parser.previous, "Match not exhaustive. Missing 'ok' or 'err'.");
             } else {
                 if (covered_count < ed->variant_count) error_at(&parser.previous, "Match not exhaustive.");
             }
@@ -1948,16 +2046,16 @@ Chunk* compiler_compile(const char* source, const char* base_dir, const char* st
     add_native("len", 0, VAL_INT, 1, VAL_OBJ);
     add_native("append", 1, VAL_OBJ, 2, VAL_OBJ, VAL_ANY);
     add_native("str", 2, VAL_STR, 1, VAL_ANY);
-    add_native("readFile", 3, VAL_STR, 1, VAL_STR);
-    add_native("writeFile", 4, VAL_BOOL, 2, VAL_STR, VAL_STR);
+    add_native("readFile", 3, MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, VAL_STR), 1, VAL_STR);
+    add_native("writeFile", 4, MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, VAL_BOOL), 2, VAL_STR, VAL_STR);
     add_native("args", 5, VAL_OBJ, 0);
-    add_native("int", 6, VAL_INT, 1, VAL_ANY);
+    add_native("int", 6, MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, VAL_INT), 1, VAL_ANY);
     add_native("print", 7, VAL_VOID, 1, VAL_ANY);
     add_native("println", 8, VAL_VOID, 1, VAL_ANY);
     add_native("readLine", 9, VAL_STR, 0);
     add_native("exit", 10, VAL_VOID, 1, VAL_INT);
     add_native("clock", 11, VAL_FLT, 0);
-    add_native("system", 12, VAL_INT, 1, VAL_STR);
+    add_native("system", 12, MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, VAL_INT), 1, VAL_STR);
     add_native("keys", 13, VAL_OBJ, 1, VAL_MAP);
     add_native("delete", 14, VAL_VOID, 2, VAL_MAP, VAL_ANY);
     add_native("ascii", 15, VAL_INT, 1, VAL_STR);
@@ -1970,19 +2068,19 @@ Chunk* compiler_compile(const char* source, const char* base_dir, const char* st
     add_native("cos", 22, VAL_FLT, 1, VAL_ANY);
     add_native("tan", 23, VAL_FLT, 1, VAL_ANY);
     add_native("log", 24, VAL_FLT, 1, VAL_ANY);
-    add_native("flt", 25, VAL_FLT, 1, VAL_ANY);
+    add_native("flt", 25, MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, VAL_FLT), 1, VAL_ANY);
     add_native("rand", 26, VAL_FLT, 2, VAL_FLT, VAL_FLT);
     add_native("seed", 27, VAL_VOID, 1, VAL_INT);
-    add_native("ffiLoad", 28, VAL_INT, 1, VAL_STR);
-    add_native("ffiCall", 29, VAL_ANY, 4, VAL_INT, VAL_STR, VAL_STR, VAL_STR);
+    add_native("ffiLoad", 28, MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, VAL_INT), 1, VAL_STR);
+    add_native("ffiCall", 29, MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, VAL_ANY), 4, VAL_INT, VAL_STR, VAL_STR, VAL_STR);
     add_native("close", 30, VAL_VOID, 1, VAL_CHAN);
     add_native("json_stringify", 31, VAL_STR, 1, VAL_ANY);
-    add_native("json_parse", 32, VAL_ANY, 1, VAL_STR);
-    add_native("httpGet", 33, VAL_STR, 1, VAL_STR);
+    add_native("json_parse", 32, MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, VAL_ANY), 1, VAL_STR);
+    add_native("httpGet", 33, MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, VAL_STR), 1, VAL_STR);
     add_native("regexMatch", 34, VAL_BOOL, 2, VAL_STR, VAL_STR);
     add_native("fileExists", 35, VAL_BOOL, 1, VAL_STR);
-    add_native("removeFile", 36, VAL_BOOL, 1, VAL_STR);
-    add_native("listDir", 37, MAKE_TYPE(VAL_OBJ, VAL_STR, 0), 1, VAL_STR);
+    add_native("removeFile", 36, MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, VAL_BOOL), 1, VAL_STR);
+    add_native("listDir", 37, MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, VAL_OBJ), 1, VAL_STR);
 
     parser.had_error = false;
     parser.panic_mode = false;

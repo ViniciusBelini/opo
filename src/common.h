@@ -85,6 +85,7 @@ typedef enum {
 } ValueType;
 
 #define OPTION_ENUM_ID 0xFF
+#define RESULT_ENUM_ID 0xFE
 
 typedef uint32_t Type;
 #define TYPE_KIND(t) ((t) & 0xFF)

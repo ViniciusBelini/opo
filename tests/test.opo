@@ -1,11 +1,5 @@
-"std/fs" => fs: imp
-
 <> -> void: main[
-    fs.read_file("README.md") => file: str?
+    20 => idd: any
 
-    file ? [
-        "File content: "+file.some !!
-    ] : [
-        "File not found!" !!
-    ]
+    println(idd)
 ]

@@ -1,12 +1,8 @@
-pub <path: str> -> str?: read_file[
-    fileExists(path) ? [
-        some(readFile(path))
-    ] : [
-        none
-    ]
+pub <path: str> -> str!: read_file [
+    readFile(path)
 ]
 
-pub <path: str, content: str> -> bol: write_file [
+pub <path: str, content: str> -> bol!: write_file [
     writeFile(path, content)
 ]
 
@@ -14,10 +10,10 @@ pub <path: str> -> bol: exists [
     fileExists(path)
 ]
 
-pub <path: str> -> bol: remove [
+pub <path: str> -> bol!: remove [
     removeFile(path)
 ]
 
-pub <path: str> -> []str: list_dir [
+pub <path: str> -> Result<[]str>: list_dir [
     listDir(path)
 ]

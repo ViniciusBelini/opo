@@ -139,9 +139,17 @@ static TokenType identifier_type() {
                 }
             }
             break;
-        case 'e': return check_keyword(1, 3, "num", TOKEN_ENUM);
+        case 'e': 
+            if (lexer.current - lexer.start > 1) {
+                switch (lexer.start[1]) {
+                    case 'n': return check_keyword(2, 2, "um", TOKEN_ENUM);
+                    case 'r': return check_keyword(2, 1, "r", TOKEN_ERR);
+                }
+            }
+            break;
         case 'm': return check_keyword(1, 4, "atch", TOKEN_MATCH);
-        case 'n': return check_keyword(1, 3, "one", TOKEN_NONE);
+        case 'n': return check_keyword(1, 3, "none", TOKEN_NONE);
+        case 'o': return check_keyword(1, 1, "k", TOKEN_OK);
     }
     return TOKEN_ID;
 }
