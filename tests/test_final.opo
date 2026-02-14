@@ -1,31 +1,52 @@
-"std/math" => math: imp
-"std/string" => string: imp
-"std/array" => array: imp
-"std/datetime" => dt: imp
-"std/test" => test: imp
+"std/net" => net: imp
+"std/json" => json: imp
+"std/regex" => re: imp
+"std/fs" => fs: imp
+
+<ch: chan<any>> -> void: fetch_worker [
+    "Worker started, fetching Zen..." !!
+    net.get("https://api.github.com/zen") => zen: str
+    "Worker fetched Zen: " + zen !!
+    ch <- zen
+]
 
 <> -> void: main [
-    # Math improvements
-    math.PI() !!
-    math.sqrt_f(16.0) !!
+    chan<any>(1) => ch: chan<any>
     
-    # String improvements
-    string.to_upper("opo is cool") !!
-    string.to_lower("OPO IS COOL") !!
+    go fetch_worker(ch)
     
-    # Array improvements
-    [1, 2, 3] => a: []int
-    array.reverse_int(a) !!
+    "Main waiting..." !! ;
+    <-ch => result: any
     
-    # Datetime
-    "Now: " + dt.format(dt.now()) !!
-    
-    # Try/Catch
-    try [
-        throw error("Oops")
-    ] catch e [
-        "Caught in test: " + str(e) !!
+    match result [
+        str(s) [
+            "Main received Zen: " + s !!
+            
+            # Check if it has 'Opo' (it won't, but let's test regex)
+            re.is_match("Opo", s) ? [
+                "Zen mentions Opo!" !!
+            ] : [
+                "Zen does not mention Opo." !!
+            ]
+            
+            # Write to file
+            fs.write_file("zen.txt", s) !!
+            "Written to zen.txt" !!
+        ]
+        void [
+            "Main received nothing." !!
+        ]
     ]
     
-    "Success!" !!
+    fs.exists("zen.txt") ? [
+        "Verified: zen.txt exists." !!
+        fs.list_dir(".") => files: []str
+        "File count: " + str(len(files)) !!
+        fs.remove("zen.txt") !!
+        "zen.txt cleaned up." !!
+    ] : [
+        "zen.txt missing!" !!
+    ]
+    
+    "All tests completed successfully." !!
 ]

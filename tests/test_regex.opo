@@ -1,0 +1,29 @@
+"std/regex" => re: imp
+
+<> -> void: main [
+    "Testing Regex..." !!
+    
+    re.is_match("^hello", "hello world") ? [
+        "Test 1 Passed: ^hello matches 'hello world'" !!
+    ] : [
+        "Test 1 Failed" !!
+    ]
+    
+    re.is_match("world$", "hello world") ? [
+        "Test 2 Passed: world$ matches 'hello world'" !!
+    ] : [
+        "Test 2 Failed" !!
+    ]
+    
+    re.is_match("[0-9]+", "abc123def") ? [
+        "Test 3 Passed: [0-9]+ matches 'abc123def'" !!
+    ] : [
+        "Test 3 Failed" !!
+    ]
+    
+    re.is_match("^[0-9]+$", "abc123def") ? [
+        "Test 4 Failed" !!
+    ] : [
+        "Test 4 Passed: ^[0-9]+$ does not match 'abc123def'" !!
+    ]
+]

@@ -1,0 +1,5 @@
+"std/net" => net: imp
+<> -> void: main [
+    net.get("https://api.github.com/zen") => zen: str
+    "Zen: " + zen !!
+]

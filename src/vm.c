@@ -5,6 +5,9 @@
 #include <math.h>
 #include <stdarg.h>
 #include <ctype.h>
+#include <regex.h>
+#include <unistd.h>
+#include <dirent.h>
 #include <dlfcn.h>
 #include <ffi.h>
 #include "vm.h"
@@ -12,7 +15,7 @@
 void retain(Value val) {
     int kind = TYPE_KIND(val.type);
     if ((kind == VAL_OBJ || kind == VAL_MAP || kind == VAL_ENUM || kind == VAL_CHAN) && val.as.obj != NULL) {
-        val.as.obj->ref_count++;
+        atomic_fetch_add(&val.as.obj->ref_count, 1);
     }
 }
 
@@ -89,8 +92,7 @@ static void free_object(HeapObject* obj) {
 void release(Value val) {
     int kind = TYPE_KIND(val.type);
     if ((kind == VAL_OBJ || kind == VAL_MAP || kind == VAL_ENUM || kind == VAL_CHAN) && val.as.obj != NULL) {
-        val.as.obj->ref_count--;
-        if (val.as.obj->ref_count <= 0) {
+        if (atomic_fetch_sub(&val.as.obj->ref_count, 1) == 1) {
             free_object(val.as.obj);
         }
     }
@@ -173,16 +175,31 @@ static uint32_t hash_value(Value v) {
     }
 }
 
+static bool is_string(Value v) {
+    int kind = TYPE_KIND(v.type);
+    return kind == VAL_STR || (kind == VAL_OBJ && v.as.obj != NULL && v.as.obj->type == OBJ_STRING);
+}
+
+static const char* get_string_ptr(VM* vm, Value v) {
+    if (TYPE_KIND(v.type) == VAL_STR && vm != NULL) return vm->strings[v.as.s_idx];
+    if (TYPE_KIND(v.type) == VAL_OBJ && v.as.obj != NULL && v.as.obj->type == OBJ_STRING) 
+        return ((ObjString*)v.as.obj)->chars;
+    return NULL;
+}
+
 static bool values_equal(Value a, Value b) {
+    if (is_string(a) && is_string(b)) {
+        const char* sa = get_string_ptr(NULL, a);
+        const char* sb = get_string_ptr(NULL, b);
+        if (sa != NULL && sb != NULL) return strcmp(sa, sb) == 0;
+        return false;
+    }
     if (TYPE_KIND(a.type) != TYPE_KIND(b.type)) return false;
     switch (TYPE_KIND(a.type)) {
         case VAL_INT: return a.as.i_val == b.as.i_val;
         case VAL_FLT: return a.as.f_val == b.as.f_val;
         case VAL_BOOL: return a.as.b_val == b.as.b_val;
         case VAL_OBJ:
-            if (a.as.obj->type == OBJ_STRING && b.as.obj->type == OBJ_STRING) {
-                return strcmp(((ObjString*)a.as.obj)->chars, ((ObjString*)b.as.obj)->chars) == 0;
-            }
             return a.as.obj == b.as.obj;
         default: return false;
     }
@@ -243,9 +260,11 @@ static Value map_get(ObjMap* map, Value key) {
 }
 
 static Value native_len(VM* vm, int arg_count, Value* args) {
-    (void)vm;
     if (arg_count != 1) return (Value){VAL_VOID, {0}};
     Value obj = args[0];
+    if (TYPE_KIND(obj.type) == VAL_STR) {
+        return (Value){VAL_INT, {.i_val = (int64_t)strlen(vm->strings[obj.as.s_idx])}};
+    }
     if (TYPE_KIND(obj.type) == VAL_OBJ || TYPE_KIND(obj.type) == VAL_MAP) {
         if (obj.as.obj->type == OBJ_STRING) return (Value){VAL_INT, {.i_val = ((ObjString*)obj.as.obj)->length}};
         if (obj.as.obj->type == OBJ_ARRAY) return (Value){VAL_INT, {.i_val = ((ObjArray*)obj.as.obj)->count}};
@@ -354,8 +373,8 @@ static Value native_str(VM* vm, int arg_count, Value* args) {
 }
 
 static Value native_readFile(VM* vm, int arg_count, Value* args) {
-    if (arg_count != 1 || args[0].type != VAL_OBJ || args[0].as.obj->type != OBJ_STRING) return (Value){VAL_VOID, {0}};
-    const char* path = ((ObjString*)args[0].as.obj)->chars;
+    if (arg_count != 1 || !is_string(args[0])) return (Value){VAL_VOID, {0}};
+    const char* path = get_string_ptr(vm, args[0]);
     FILE* file = fopen(path, "rb");
     if (file == NULL) return (Value){VAL_VOID, {0}};
     fseek(file, 0L, SEEK_END);
@@ -372,11 +391,9 @@ static Value native_readFile(VM* vm, int arg_count, Value* args) {
 }
 
 static Value native_writeFile(VM* vm, int arg_count, Value* args) {
-    (void)vm;
-    if (arg_count != 2 || args[0].type != VAL_OBJ || args[0].as.obj->type != OBJ_STRING ||
-        args[1].type != VAL_OBJ || args[1].as.obj->type != OBJ_STRING) return (Value){VAL_VOID, {0}};
-    const char* path = ((ObjString*)args[0].as.obj)->chars;
-    const char* content = ((ObjString*)args[1].as.obj)->chars;
+    if (arg_count != 2 || !is_string(args[0]) || !is_string(args[1])) return (Value){VAL_VOID, {0}};
+    const char* path = get_string_ptr(vm, args[0]);
+    const char* content = get_string_ptr(vm, args[1]);
     FILE* file = fopen(path, "wb");
     if (file == NULL) return (Value){VAL_BOOL, {.b_val = false}};
     fwrite(content, 1, strlen(content), file);
@@ -406,9 +423,9 @@ static Value native_int(VM* vm, int arg_count, Value* args) {
     Value val = args[0];
     if (TYPE_KIND(val.type) == VAL_INT) return val;
     if (TYPE_KIND(val.type) == VAL_FLT) return (Value){VAL_INT, {.i_val = (int64_t)val.as.f_val}};
-    if ((TYPE_KIND(val.type) == VAL_OBJ || TYPE_KIND(val.type) == VAL_MAP) && val.as.obj->type == OBJ_STRING) {
+    if (is_string(val)) {
         char* endptr;
-        const char* str = ((ObjString*)val.as.obj)->chars;
+        const char* str = get_string_ptr(vm, val);
         int64_t res = strtoll(str, &endptr, 10);
         if (*str == '\0' || *endptr != '\0') {
             runtime_error(vm, "Invalid format for int(): '%s'", str);
@@ -428,9 +445,9 @@ static Value native_flt(VM* vm, int arg_count, Value* args) {
     Value val = args[0];
     if (TYPE_KIND(val.type) == VAL_FLT) return val;
     if (TYPE_KIND(val.type) == VAL_INT) return (Value){VAL_FLT, {.f_val = (double)val.as.i_val}};
-    if ((TYPE_KIND(val.type) == VAL_OBJ || TYPE_KIND(val.type) == VAL_MAP) && val.as.obj->type == OBJ_STRING) {
+    if (is_string(val)) {
         char* endptr;
-        const char* str = ((ObjString*)val.as.obj)->chars;
+        const char* str = get_string_ptr(vm, val);
         double res = strtod(str, &endptr);
         if (*str == '\0' || *endptr != '\0') {
             runtime_error(vm, "Invalid format for flt(): '%s'", str);
@@ -488,9 +505,8 @@ static Value native_clock(VM* vm, int arg_count, Value* args) {
 }
 
 static Value native_system(VM* vm, int arg_count, Value* args) {
-    (void)vm;
-    if (arg_count != 1 || args[0].type != VAL_OBJ || args[0].as.obj->type != OBJ_STRING) return (Value){VAL_INT, {.i_val = -1}};
-    int res = system(((ObjString*)args[0].as.obj)->chars);
+    if (arg_count != 1 || !is_string(args[0])) return (Value){VAL_INT, {.i_val = -1}};
+    int res = system(get_string_ptr(vm, args[0]));
     return (Value){VAL_INT, {.i_val = res}};
 }
 
@@ -560,11 +576,10 @@ static Value native_delete(VM* vm, int arg_count, Value* args) {
 }
 
 static Value native_ascii(VM* vm, int arg_count, Value* args) {
-    (void)vm;
-    if (arg_count != 1 || args[0].type != VAL_OBJ || args[0].as.obj->type != OBJ_STRING) return (Value){VAL_INT, {.i_val = 0}};
-    ObjString* s = (ObjString*)args[0].as.obj;
-    if (s->length == 0) return (Value){VAL_INT, {.i_val = 0}};
-    return (Value){VAL_INT, {.i_val = (uint8_t)s->chars[0]}};
+    if (arg_count != 1 || !is_string(args[0])) return (Value){VAL_INT, {.i_val = 0}};
+    const char* s = get_string_ptr(vm, args[0]);
+    if (s == NULL || s[0] == '\0') return (Value){VAL_INT, {.i_val = 0}};
+    return (Value){VAL_INT, {.i_val = (uint8_t)s[0]}};
 }
 
 static Value native_char(VM* vm, int arg_count, Value* args) {
@@ -678,11 +693,11 @@ static Value native_seed(VM* vm, int arg_count, Value* args) {
 }
 
 static Value native_ffiLoad(VM* vm, int arg_count, Value* args) {
-    if (arg_count != 1 || TYPE_KIND(args[0].type) != VAL_OBJ || args[0].as.obj->type != OBJ_STRING) {
+    if (arg_count != 1 || !is_string(args[0])) {
         runtime_error(vm, "ffiLoad() expects 1 string argument");
         return (Value){VAL_VOID, {0}};
     }
-    const char* path = ((ObjString*)args[0].as.obj)->chars;
+    const char* path = get_string_ptr(vm, args[0]);
     if (strlen(path) == 0) path = NULL;
     void* handle = dlopen(path, RTLD_LAZY | RTLD_GLOBAL);
     if (!handle) {
@@ -699,9 +714,9 @@ static Value native_ffiCall(VM* vm, int arg_count, Value* args) {
     }
 
     void* handle = (void*)args[0].as.i_val;
-    const char* name = ((ObjString*)args[1].as.obj)->chars;
-    const char* arg_types_str = ((ObjString*)args[2].as.obj)->chars;
-    const char* ret_type_str = ((ObjString*)args[3].as.obj)->chars;
+    const char* name = get_string_ptr(vm, args[1]);
+    const char* arg_types_str = get_string_ptr(vm, args[2]);
+    const char* ret_type_str = get_string_ptr(vm, args[3]);
 
     void* func = dlsym(handle, name);
     if (!func) {
@@ -731,7 +746,11 @@ static Value native_ffiCall(VM* vm, int arg_count, Value* args) {
                 break;
             case 's':
                 arg_types[i] = &ffi_type_pointer;
-                arg_values[i] = &((ObjString*)args[4+i].as.obj)->chars;
+                {
+                    static const char* temp_strs[32];
+                    temp_strs[i] = get_string_ptr(vm, args[4+i]);
+                    arg_values[i] = &temp_strs[i];
+                }
                 break;
             case 'p':
                 arg_types[i] = &ffi_type_pointer;
@@ -785,58 +804,86 @@ static Value native_ffiCall(VM* vm, int arg_count, Value* args) {
 static Value native_json_stringify(VM* vm, int arg_count, Value* args);
 static Value native_json_parse(VM* vm, int arg_count, Value* args);
 
-static void stringify_inner(VM* vm, Value v, char* b) {
+typedef struct {
+    char* data;
+    int length;
+    int capacity;
+} StringBuilder;
+
+static void sb_init(StringBuilder* sb) {
+    sb->capacity = 1024;
+    sb->data = malloc(sb->capacity);
+    sb->length = 0;
+    sb->data[0] = '\0';
+}
+
+static void sb_append(StringBuilder* sb, const char* str) {
+    int len = (int)strlen(str);
+    if (sb->length + len + 1 >= sb->capacity) {
+        while (sb->length + len + 1 >= sb->capacity) sb->capacity *= 2;
+        sb->data = realloc(sb->data, sb->capacity);
+    }
+    memcpy(sb->data + sb->length, str, len);
+    sb->length += len;
+    sb->data[sb->length] = '\0';
+}
+
+static void stringify_inner(VM* vm, Value v, StringBuilder* sb) {
     int kind = TYPE_KIND(v.type);
-    if (kind == VAL_INT) sprintf(b + strlen(b), "%ld", v.as.i_val);
-    else if (kind == VAL_FLT) sprintf(b + strlen(b), "%g", v.as.f_val);
-    else if (kind == VAL_BOOL) strcat(b, v.as.b_val ? "true" : "false");
-    else if (kind == VAL_VOID) strcat(b, "null");
-    else if (kind == VAL_STR) {
-        strcat(b, "\"");
-        strcat(b, vm->strings[v.as.s_idx]);
-        strcat(b, "\"");
-    }
-    else if (kind == VAL_OBJ && v.as.obj->type == OBJ_STRING) {
-        strcat(b, "\"");
-        strcat(b, ((ObjString*)v.as.obj)->chars);
-        strcat(b, "\"");
-    }
-    else if (kind == VAL_OBJ && v.as.obj->type == OBJ_ARRAY) {
+    char buf[128];
+    if (kind == VAL_INT) {
+        sprintf(buf, "%ld", v.as.i_val);
+        sb_append(sb, buf);
+    } else if (kind == VAL_FLT) {
+        sprintf(buf, "%g", v.as.f_val);
+        sb_append(sb, buf);
+    } else if (kind == VAL_BOOL) {
+        sb_append(sb, v.as.b_val ? "true" : "false");
+    } else if (kind == VAL_VOID) {
+        sb_append(sb, "null");
+    } else if (kind == VAL_STR) {
+        sb_append(sb, "\"");
+        sb_append(sb, vm->strings[v.as.s_idx]);
+        sb_append(sb, "\"");
+    } else if (kind == VAL_OBJ && v.as.obj->type == OBJ_STRING) {
+        sb_append(sb, "\"");
+        sb_append(sb, ((ObjString*)v.as.obj)->chars);
+        sb_append(sb, "\"");
+    } else if (kind == VAL_OBJ && v.as.obj->type == OBJ_ARRAY) {
         ObjArray* array = (ObjArray*)v.as.obj;
-        strcat(b, "[");
+        sb_append(sb, "[");
         for (int i = 0; i < array->count; i++) {
-            stringify_inner(vm, array->items[i], b);
-            if (i < array->count - 1) strcat(b, ",");
+            stringify_inner(vm, array->items[i], sb);
+            if (i < array->count - 1) sb_append(sb, ",");
         }
-        strcat(b, "]");
-    }
-    else if ((kind == VAL_OBJ || kind == VAL_MAP) && v.as.obj->type == OBJ_MAP) {
+        sb_append(sb, "]");
+    } else if ((kind == VAL_OBJ || kind == VAL_MAP) && v.as.obj->type == OBJ_MAP) {
         ObjMap* map = (ObjMap*)v.as.obj;
-        strcat(b, "{");
+        sb_append(sb, "{");
         bool first = true;
         for (int i = 0; i < map->capacity; i++) {
             if (map->entries[i].is_used) {
-                if (!first) strcat(b, ",");
-                stringify_inner(vm, map->entries[i].key, b);
-                strcat(b, ":");
-                stringify_inner(vm, map->entries[i].value, b);
+                if (!first) sb_append(sb, ",");
+                stringify_inner(vm, map->entries[i].key, sb);
+                sb_append(sb, ":");
+                stringify_inner(vm, map->entries[i].value, sb);
                 first = false;
             }
         }
-        strcat(b, "}");
+        sb_append(sb, "}");
     } else {
-        strcat(b, "null");
+        sb_append(sb, "null");
     }
 }
 
 static Value native_json_stringify(VM* vm, int arg_count, Value* args) {
     if (arg_count != 1) return (Value){VAL_VOID, {0}};
     Value val = args[0];
-    char* buf = malloc(1024 * 10); // 10KB buffer for now
-    buf[0] = '\0';
-    stringify_inner(vm, val, buf);
-    ObjString* s = allocate_string(vm, buf, (int)strlen(buf));
-    free(buf);
+    StringBuilder sb;
+    sb_init(&sb);
+    stringify_inner(vm, val, &sb);
+    ObjString* s = allocate_string(vm, sb.data, sb.length);
+    free(sb.data);
     return (Value){VAL_OBJ, {.obj = (HeapObject*)s}};
 }
 
@@ -925,14 +972,98 @@ static Value parse_value(VM* vm, const char** pp) {
     return (Value){VAL_VOID, {0}};
 }
 
+static Value native_fileExists(VM* vm, int arg_count, Value* args) {
+    if (arg_count != 1 || !is_string(args[0])) {
+        runtime_error(vm, "fileExists() expects 1 string argument");
+        return (Value){VAL_VOID, {0}};
+    }
+    const char* path = get_string_ptr(vm, args[0]);
+    return (Value){VAL_BOOL, {.b_val = access(path, F_OK) != -1}};
+}
+
+static Value native_removeFile(VM* vm, int arg_count, Value* args) {
+    if (arg_count != 1 || !is_string(args[0])) {
+        runtime_error(vm, "removeFile() expects 1 string argument");
+        return (Value){VAL_VOID, {0}};
+    }
+    const char* path = get_string_ptr(vm, args[0]);
+    return (Value){VAL_BOOL, {.b_val = remove(path) == 0}};
+}
+
+static Value native_listDir(VM* vm, int arg_count, Value* args) {
+    if (arg_count != 1 || !is_string(args[0])) {
+        runtime_error(vm, "listDir() expects 1 string argument");
+        return (Value){VAL_VOID, {0}};
+    }
+    const char* path = get_string_ptr(vm, args[0]);
+    DIR* d = opendir(path);
+    if (!d) return (Value){VAL_VOID, {0}};
+
+    ObjArray* array = allocate_array(vm);
+    struct dirent* dir;
+    while ((dir = readdir(d)) != NULL) {
+        if (strcmp(dir->d_name, ".") == 0 || strcmp(dir->d_name, "..") == 0) continue;
+        ObjString* s = allocate_string(vm, dir->d_name, (int)strlen(dir->d_name));
+        Value val = (Value){VAL_OBJ, {.obj = (HeapObject*)s}};
+        if (array->count >= array->capacity) {
+            array->capacity = array->capacity < 8 ? 8 : array->capacity * 2;
+            array->items = realloc(array->items, sizeof(Value) * array->capacity);
+        }
+        retain(val);
+        array->items[array->count++] = val;
+    }
+    closedir(d);
+    return (Value){MAKE_TYPE(VAL_OBJ, VAL_STR, 0), {.obj = (HeapObject*)array}};
+}
+
+static Value native_regexMatch(VM* vm, int arg_count, Value* args) {
+    if (arg_count != 2 || !is_string(args[0]) || !is_string(args[1])) {
+        runtime_error(vm, "regexMatch() expects 2 string arguments (pattern, string)");
+        return (Value){VAL_VOID, {0}};
+    }
+    const char* pattern = get_string_ptr(vm, args[0]);
+    const char* text = get_string_ptr(vm, args[1]);
+
+    regex_t regex;
+    int reti;
+    bool result = false;
+
+    reti = regcomp(&regex, pattern, REG_EXTENDED);
+    if (reti) {
+        runtime_error(vm, "Could not compile regex");
+        return (Value){VAL_VOID, {0}};
+    }
+
+    reti = regexec(&regex, text, 0, NULL, 0);
+    if (!reti) {
+        result = true;
+    } else if (reti != REG_NOMATCH) {
+        char msgbuf[100];
+        regerror(reti, &regex, msgbuf, sizeof(msgbuf));
+        runtime_error(vm, "Regex match failed: %s", msgbuf);
+    }
+
+    regfree(&regex);
+    return (Value){VAL_BOOL, {.b_val = result}};
+}
+
 static Value native_httpGet(VM* vm, int arg_count, Value* args) {
-    if (arg_count != 1 || TYPE_KIND(args[0].type) != VAL_OBJ || args[0].as.obj->type != OBJ_STRING) {
+    if (arg_count != 1 || !is_string(args[0])) {
         runtime_error(vm, "httpGet() expects 1 string argument");
         return (Value){VAL_VOID, {0}};
     }
-    const char* url = ((ObjString*)args[0].as.obj)->chars;
-    char cmd[2048];
-    snprintf(cmd, sizeof(cmd), "curl -s -L \"%s\"", url);
+    const char* url = get_string_ptr(vm, args[0]);
+    
+    // Safety check for URL: avoid command injection by only allowing certain characters
+    for (const char* c = url; *c; c++) {
+        if (!isalnum(*c) && !strchr(":/._-?&=%#+", *c)) {
+            runtime_error(vm, "Insecure URL character: '%c'", *c);
+            return (Value){VAL_VOID, {0}};
+        }
+    }
+
+    char cmd[4096];
+    snprintf(cmd, sizeof(cmd), "curl -s -L '%s'", url);
     
     FILE* fp = popen(cmd, "r");
     if (fp == NULL) return (Value){VAL_VOID, {0}};
@@ -960,11 +1091,11 @@ static Value native_httpGet(VM* vm, int arg_count, Value* args) {
 }
 
 static Value native_json_parse(VM* vm, int arg_count, Value* args) {
-    if (arg_count != 1 || TYPE_KIND(args[0].type) != VAL_OBJ || args[0].as.obj->type != OBJ_STRING) {
+    if (arg_count != 1 || !is_string(args[0])) {
         runtime_error(vm, "json_parse() expects 1 string argument");
         return (Value){VAL_VOID, {0}};
     }
-    const char* json = ((ObjString*)args[0].as.obj)->chars;
+    const char* json = get_string_ptr(vm, args[0]);
     const char* p = json;
     return parse_value(vm, &p);
 }
@@ -1079,6 +1210,10 @@ void vm_init(VM* vm, uint8_t* code, char** strings, int strings_count, int argc,
     vm_define_native(vm, "json_stringify", native_json_stringify, 31);
     vm_define_native(vm, "json_parse", native_json_parse, 32);
     vm_define_native(vm, "httpGet", native_httpGet, 33);
+    vm_define_native(vm, "regexMatch", native_regexMatch, 34);
+    vm_define_native(vm, "fileExists", native_fileExists, 35);
+    vm_define_native(vm, "removeFile", native_removeFile, 36);
+    vm_define_native(vm, "listDir", native_listDir, 37);
 }
 
 typedef struct {
@@ -1325,13 +1460,14 @@ void vm_run(VM* vm) {
                     vm_push(vm, (Value){VAL_INT, {.i_val = a.as.i_val + b.as.i_val}});
                 } else if (TYPE_KIND(a.type) == VAL_FLT && TYPE_KIND(b.type) == VAL_FLT) {
                     vm_push(vm, (Value){VAL_FLT, {.f_val = a.as.f_val + b.as.f_val}});
-                } else if (TYPE_KIND(a.type) == VAL_OBJ && a.as.obj->type == OBJ_STRING && TYPE_KIND(b.type) == VAL_OBJ && b.as.obj->type == OBJ_STRING) {
-                    ObjString* sa = (ObjString*)a.as.obj;
-                    ObjString* sb = (ObjString*)b.as.obj;
-                    int new_len = sa->length + sb->length;
-                    ObjString* res = allocate_string(vm, NULL, new_len);
-                    memcpy(res->chars, sa->chars, sa->length);
-                    memcpy(res->chars + sa->length, sb->chars, sb->length);
+                } else if (is_string(a) && is_string(b)) {
+                    const char* sa = get_string_ptr(vm, a);
+                    const char* sb = get_string_ptr(vm, b);
+                    int la = (TYPE_KIND(a.type) == VAL_STR) ? (int)strlen(sa) : ((ObjString*)a.as.obj)->length;
+                    int lb = (TYPE_KIND(b.type) == VAL_STR) ? (int)strlen(sb) : ((ObjString*)b.as.obj)->length;
+                    ObjString* res = allocate_string(vm, NULL, la + lb);
+                    memcpy(res->chars, sa, la);
+                    memcpy(res->chars + la, sb, lb);
                     vm_push(vm, (Value){VAL_OBJ, {.obj = (HeapObject*)res}});
                 } else {
                     fprintf(stderr, "Type error in ADD\n");
@@ -1396,20 +1532,7 @@ void vm_run(VM* vm) {
             case OP_EQ: {
                 Value b = vm_pop(vm);
                 Value a = vm_pop(vm);
-                bool res = false;
-                if (TYPE_KIND(a.type) == TYPE_KIND(b.type)) {
-                    if (TYPE_KIND(a.type) == VAL_INT) res = a.as.i_val == b.as.i_val;
-                    else if (TYPE_KIND(a.type) == VAL_FLT) res = a.as.f_val == b.as.f_val;
-                    else if (TYPE_KIND(a.type) == VAL_BOOL) res = a.as.b_val == b.as.b_val;
-                    else if (TYPE_KIND(a.type) == VAL_OBJ && TYPE_KIND(b.type) == VAL_OBJ) {
-                        if (a.as.obj->type == OBJ_STRING && b.as.obj->type == OBJ_STRING) {
-                            res = strcmp(((ObjString*)a.as.obj)->chars, ((ObjString*)b.as.obj)->chars) == 0;
-                        } else {
-                            res = a.as.obj == b.as.obj;
-                        }
-                    }
-                }
-                vm_push(vm, (Value){VAL_BOOL, {.b_val = res}});
+                vm_push(vm, (Value){VAL_BOOL, {.b_val = values_equal(a, b)}});
                 release(a); release(b);
                 break;
             }
@@ -1511,15 +1634,16 @@ void vm_run(VM* vm) {
                         break;
                     }
                     vm_push(vm, array->items[idx]);
-                } else if (TYPE_KIND(obj.type) == VAL_OBJ && obj.as.obj->type == OBJ_STRING) {
-                    ObjString* s = (ObjString*)obj.as.obj;
+                } else if (is_string(obj)) {
+                    const char* s = get_string_ptr(vm, obj);
+                    int len = (TYPE_KIND(obj.type) == VAL_STR) ? (int)strlen(s) : ((ObjString*)obj.as.obj)->length;
                     int idx = (int)index.as.i_val;
-                    if (idx < 0 || idx >= s->length) {
+                    if (idx < 0 || idx >= len) {
                         release(obj); release(index);
-                        runtime_error(vm, "String index %d out of bounds (length %d)", idx, s->length);
+                        runtime_error(vm, "String index %d out of bounds (length %d)", idx, len);
                         break;
                     }
-                    char buf[2] = {s->chars[idx], '\0'};
+                    char buf[2] = {s[idx], '\0'};
                     ObjString* res = allocate_string(vm, buf, 1);
                     vm_push(vm, (Value){VAL_OBJ, {.obj = (HeapObject*)res}});
                 } else if ((TYPE_KIND(obj.type) == VAL_OBJ || TYPE_KIND(obj.type) == VAL_MAP) && obj.as.obj->type == OBJ_MAP) {
@@ -1703,6 +1827,13 @@ void vm_run(VM* vm) {
                          val.as.obj != NULL && val.as.obj->type == OBJ_STRING) match = true;
                 
                 vm_push(vm, (Value){VAL_BOOL, {.b_val = match}});
+                break;
+            }
+            case OP_AS_TYPE: {
+                Type type = (Type)read_int32(vm);
+                Value val = vm_pop(vm);
+                val.type = type;
+                vm_push(vm, val);
                 break;
             }
             case OP_IS_TRUTHY: {

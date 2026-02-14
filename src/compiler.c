@@ -1371,7 +1371,6 @@ static void block() {
 static void handle_import(Token* path_token, Token* alias_token);
 
 static Type type_from_name(Token t) {
-    printf("type_from_name: %.*s\n", t.length, t.start); fflush(stdout);
     if (t.length == 3 && memcmp(t.start, "int", 3) == 0) return VAL_INT;
     if (t.length == 3 && memcmp(t.start, "flt", 3) == 0) return VAL_FLT;
     if (t.length == 3 && memcmp(t.start, "bol", 3) == 0) return VAL_BOOL;
@@ -1727,11 +1726,9 @@ static void statement() {
                 }
                 
                 if (is_any) {
-                    // For 'any', we don't need to extract anything, the value is already the payload
-                    // but we need it on top of stack for OP_STORE.
-                    // match peeks, so we can just duplicate it.
-                    // Wait, Opo doesn't have OP_DUP. I'll use OP_GET_ENUM_PAYLOAD which I will modify.
                     emit_byte(OP_GET_ENUM_PAYLOAD);
+                    emit_byte(OP_AS_TYPE);
+                    emit_int32(p_type);
                 } else {
                     emit_byte(OP_GET_ENUM_PAYLOAD);
                 }
@@ -1982,6 +1979,10 @@ Chunk* compiler_compile(const char* source, const char* base_dir, const char* st
     add_native("json_stringify", 31, VAL_STR, 1, VAL_ANY);
     add_native("json_parse", 32, VAL_ANY, 1, VAL_STR);
     add_native("httpGet", 33, VAL_STR, 1, VAL_STR);
+    add_native("regexMatch", 34, VAL_BOOL, 2, VAL_STR, VAL_STR);
+    add_native("fileExists", 35, VAL_BOOL, 1, VAL_STR);
+    add_native("removeFile", 36, VAL_BOOL, 1, VAL_STR);
+    add_native("listDir", 37, MAKE_TYPE(VAL_OBJ, VAL_STR, 0), 1, VAL_STR);
 
     parser.had_error = false;
     parser.panic_mode = false;

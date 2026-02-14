@@ -58,7 +58,8 @@ typedef enum {
     OP_CHAN,
     OP_SEND,
     OP_RECV,
-    OP_CHECK_TYPE
+    OP_CHECK_TYPE,
+    OP_AS_TYPE
 } OpCode;
 
 typedef enum {
@@ -103,7 +104,7 @@ typedef enum {
 
 struct HeapObject {
     ObjType type;
-    int ref_count;
+    _Atomic int ref_count;
 };
 
 typedef struct HeapObject HeapObject;

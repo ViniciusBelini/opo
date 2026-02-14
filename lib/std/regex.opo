@@ -1,0 +1,3 @@
+pub <pattern: str, text: str> -> bol: is_match [
+    regexMatch(pattern, text)
+]

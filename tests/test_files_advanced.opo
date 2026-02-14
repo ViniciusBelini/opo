@@ -1,0 +1,27 @@
+<> -> void: main [
+    "Testing advanced file operations..." !!
+    
+    writeFile("test_file.txt", "Hello Opo!") !!
+    
+    fileExists("test_file.txt") ? [
+        "Test 1 Passed: test_file.txt exists" !!
+    ] : [
+        "Test 1 Failed" !!
+    ]
+    
+    "Files in current dir:" !!
+    listDir(".") => files: []str
+    len(files) > 0 ? [
+        "Test 2 Passed: found " + str(len(files)) + " files" !!
+    ] : [
+        "Test 2 Failed" !!
+    ]
+    
+    removeFile("test_file.txt") !!
+    
+    fileExists("test_file.txt") ? [
+        "Test 3 Failed" !!
+    ] : [
+        "Test 3 Passed: test_file.txt removed" !!
+    ]
+]

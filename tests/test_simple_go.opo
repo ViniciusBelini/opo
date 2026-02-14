@@ -1,0 +1,9 @@
+<ch: chan<str>> -> void: worker [
+    ch <- "Hello"
+]
+<> -> void: main [
+    chan<str>(1) => ch: chan<str>
+    go worker(ch)
+    <-ch => res: str
+    "Received: " + res !!
+]

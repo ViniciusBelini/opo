@@ -1,10 +1,11 @@
-"std/json" => json: imp
+"std/fs" => fs: imp
 
 <> -> void: main[
-    {"oi" => "Olá"} => js: {str: any}
+    fs.read_file("README.md") => file: str?
 
-    json.stringify(js) => tst: str
-    json.parse(tst) => jsoso: any
-
-    println(typeOf(jsoso))
+    file ? [
+        "File content: "+file.some !!
+    ] : [
+        "File not found!" !!
+    ]
 ]
