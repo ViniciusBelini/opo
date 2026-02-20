@@ -1,17 +1,11 @@
-"std/http" => http: imp
-
-<req: http.Request> -> http.Response: home [
-    http.response(200, {"Content-Type" => "text/plain"}, "Welcome to Opo HTTP Server!")
+<> -> void: funcao[
+    "Meeeee" !!
 ]
 
-<req: http.Request> -> http.Response: hello [
-    "Hello, you are visiting " + req.path => msg: str
-    http.response(200, {"Content-Type" => "text/plain"}, msg)
+<f: <> -> void> -> void: falar[
+    f()
 ]
 
-<> -> void: main [
-    http.server(8080) => s: http.Server
-    http.handle(s, "/", home)
-    http.handle(s, "/hello", hello)
-    http.start(s)
+<> -> void: main[
+    falar(funcao)
 ]
