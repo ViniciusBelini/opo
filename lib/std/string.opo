@@ -99,10 +99,8 @@ pub <s: str, delimiter: str> -> []str: split[
     start < len(s) @ [
 		"" => char_split: str
 		0 => i: int
-		i < len(delimiter) @ [
-			start+1 < len(s) ? [
-				char_split + s.(start+i) => char_split
-			]
+		(i < len(delimiter) && (start + i) < len(s)) @ [
+			char_split + s.(start+i) => char_split
 			i + 1 => i
 		]
 

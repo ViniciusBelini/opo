@@ -1,0 +1,92 @@
+pub struct [
+    method: str,
+    path: str,
+    headers: {str:str},
+    body: str
+] => Request: type
+
+pub struct [
+    status: int,
+    response_headers: {str:str},
+    response_body: str
+] => Response: type
+
+pub struct [
+    port: int,
+    handlers: {str: <Request> -> Response}
+] => Server: type
+
+pub <port: int> -> Server: server [
+    Server(port, {})
+]
+
+pub <s: Server, path: str, h: <Request> -> Response> -> void: handle [
+    s.handlers => handlers: {str: <Request> -> Response}
+    h => handlers.(path)
+]
+
+<req_map: {str:any}> -> Request: map_to_request [
+    req_map."method" as str => m: str
+    req_map."path" as str => p: str
+    req_map."headers" as {str:str} => h: {str:str}
+    req_map."body" as str => b: str
+    Request(m, p, h, b)
+]
+
+<res: Response> -> {str:any}: response_to_map [
+    {} => m: {str:any}
+    res.status => m."status"
+    res.response_headers => m."headers"
+    res.response_body => m."body"
+    m
+]
+
+<s: Server, client_fd: int> -> void: handle_client [
+    tcpRecv(client_fd, 4096) => recv_res: str!
+    match recv_res [
+        ok(request_str) [
+            len(request_str) > 0 ? [
+                httpParse(request_str) => parse_res: {str:any}!
+                match parse_res [
+                    ok(req_map) [
+                        map_to_request(req_map) => req: Request
+                        has(s.handlers, req.path) ? [
+                            s.handlers.(req.path) => handler: <Request> -> Response
+                            handler(req) => response_obj: Response
+                            tcpSend(client_fd, httpFormat(response_to_map(response_obj))) => _: int!
+                        ] : [
+                            tcpSend(client_fd, "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n\r\nNot Found") => _: int!
+                        ]
+                    ]
+                    err(m) [ "Parse error: " + m !! ]
+                ]
+            ] : []
+        ]
+        err(m) [ "Recv error: " + m !! ]
+    ]
+    tcpClose(client_fd)
+]
+
+pub <s: Server> -> void: start [
+    tcpListen(s.port) => listen_res: int!
+    match listen_res [
+        ok(listen_fd) [
+            "HTTP Server listening on port " + str(s.port) !!
+            tru @ [
+                tcpAccept(listen_fd) => accept_res: int!
+                match accept_res [
+                    ok(client_fd) [
+                        go handle_client(s, client_fd)
+                    ]
+                    err(m) [ "Accept error: " + m !! ]
+                ]
+            ]
+            tcpClose(listen_fd)
+        ]
+        err(m) [ "Failed to listen: " + m !! ]
+    ]
+]
+
+pub <status: int, headers: {str:str}, body: str> -> Response: response [
+    Response(status, headers, body)
+]

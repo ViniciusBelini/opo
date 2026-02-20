@@ -9,6 +9,10 @@
 #include <unistd.h>
 #include <errno.h>
 #include <dirent.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
 #include <dlfcn.h>
 #include <ffi.h>
 #include "vm.h"
@@ -152,9 +156,19 @@ ObjChan* allocate_chan(VM* vm, int capacity) {
     return chan;
 }
 
-static uint32_t hash_value(Value v) {
+static uint32_t hash_value(VM* vm, Value v) {
     switch (TYPE_KIND(v.type)) {
         case VAL_INT: return (uint32_t)v.as.i_val;
+        case VAL_STR: {
+            if (vm == NULL) return 0;
+            const char* s = vm->strings[v.as.s_idx];
+            uint32_t hash = 2166136261u;
+            while (*s) {
+                hash ^= (uint8_t)*s++;
+                hash *= 16777619;
+            }
+            return hash;
+        }
         case VAL_FLT: {
             union { double d; uint32_t u[2]; } conv;
             conv.d = v.as.f_val;
@@ -162,7 +176,7 @@ static uint32_t hash_value(Value v) {
         }
         case VAL_BOOL: return (uint32_t)v.as.b_val;
         case VAL_OBJ:
-            if (v.as.obj->type == OBJ_STRING) {
+            if (v.as.obj != NULL && v.as.obj->type == OBJ_STRING) {
                 ObjString* s = (ObjString*)v.as.obj;
                 uint32_t hash = 2166136261u;
                 for (int i = 0; i < s->length; i++) {
@@ -182,6 +196,7 @@ static bool is_string(Value v) {
 }
 
 static Value wrap_ok(VM* vm, Value val, Type inner_type) {
+    (void)vm;
     ObjEnum* en = malloc(sizeof(ObjEnum));
     en->obj.type = OBJ_ENUM;
     en->obj.ref_count = 0;
@@ -214,10 +229,10 @@ static const char* get_string_ptr(VM* vm, Value v) {
     return NULL;
 }
 
-static bool values_equal(Value a, Value b) {
+static bool values_equal(VM* vm, Value a, Value b) {
     if (is_string(a) && is_string(b)) {
-        const char* sa = get_string_ptr(NULL, a);
-        const char* sb = get_string_ptr(NULL, b);
+        const char* sa = get_string_ptr(vm, a);
+        const char* sb = get_string_ptr(vm, b);
         if (sa != NULL && sb != NULL) return strcmp(sa, sb) == 0;
         return false;
     }
@@ -232,7 +247,11 @@ static bool values_equal(Value a, Value b) {
     }
 }
 
-static void map_set(ObjMap* map, Value key, Value value) {
+static void map_set(VM* vm, ObjMap* map, Value key, Value value) {
+    if (map->capacity == 0) {
+        map->capacity = 8;
+        map->entries = calloc(map->capacity, sizeof(MapEntry));
+    }
     if (map->count >= map->capacity * 0.7) {
         int old_capacity = map->capacity;
         MapEntry* old_entries = map->entries;
@@ -241,9 +260,7 @@ static void map_set(ObjMap* map, Value key, Value value) {
         map->count = 0;
         for (int i = 0; i < old_capacity; i++) {
             if (old_entries[i].is_used) {
-                map_set(map, old_entries[i].key, old_entries[i].value);
-                // No need to release here because we are moving references, but wait...
-                // map_set will retain them. So we should release the old ones.
+                map_set(vm, map, old_entries[i].key, old_entries[i].value);
                 release(old_entries[i].key);
                 release(old_entries[i].value);
             }
@@ -251,10 +268,10 @@ static void map_set(ObjMap* map, Value key, Value value) {
         free(old_entries);
     }
 
-    uint32_t hash = hash_value(key);
+    uint32_t hash = hash_value(vm, key);
     int index = hash % map->capacity;
     while (map->entries[index].is_used) {
-        if (values_equal(map->entries[index].key, key)) {
+        if (values_equal(vm, map->entries[index].key, key)) {
             release(map->entries[index].value);
             retain(value);
             map->entries[index].value = value;
@@ -271,17 +288,16 @@ static void map_set(ObjMap* map, Value key, Value value) {
     map->count++;
 }
 
-static Value map_get(ObjMap* map, Value key) {
+static Value map_get(VM* vm, ObjMap* map, Value key) {
+    if (map == NULL) return (Value){VAL_VOID, {0}};
     if (map->capacity == 0) return (Value){VAL_VOID, {0}};
-    uint32_t hash = hash_value(key);
+    uint32_t hash = hash_value(vm, key);
     int index = hash % map->capacity;
-    int start = index;
     while (map->entries[index].is_used) {
-        if (values_equal(map->entries[index].key, key)) {
+        if (values_equal(vm, map->entries[index].key, key)) {
             return map->entries[index].value;
         }
         index = (index + 1) % map->capacity;
-        if (index == start) break;
     }
     return (Value){VAL_VOID, {0}};
 }
@@ -533,7 +549,7 @@ static Value native_system(VM* vm, int arg_count, Value* args) {
 }
 
 static Value native_keys(VM* vm, int arg_count, Value* args) {
-    if (arg_count != 1 || args[0].type != VAL_OBJ || args[0].as.obj->type != OBJ_MAP) return (Value){VAL_VOID, {0}};
+    if (arg_count != 1 || (TYPE_KIND(args[0].type) != VAL_OBJ && TYPE_KIND(args[0].type) != VAL_MAP) || args[0].as.obj->type != OBJ_MAP) return (Value){VAL_VOID, {0}};
     ObjMap* map = (ObjMap*)args[0].as.obj;
     ObjArray* array = allocate_array(vm);
     array->items = malloc(sizeof(Value) * map->count);
@@ -551,15 +567,15 @@ static Value native_keys(VM* vm, int arg_count, Value* args) {
 
 static Value native_delete(VM* vm, int arg_count, Value* args) {
     (void)vm;
-    if (arg_count != 2 || args[0].type != VAL_OBJ || args[0].as.obj->type != OBJ_MAP) return (Value){VAL_VOID, {0}};
+    if (arg_count != 2 || (TYPE_KIND(args[0].type) != VAL_OBJ && TYPE_KIND(args[0].type) != VAL_MAP) || args[0].as.obj->type != OBJ_MAP) return (Value){VAL_VOID, {0}};
     ObjMap* map = (ObjMap*)args[0].as.obj;
     Value key = args[1];
     
     if (map->capacity == 0) return (Value){VAL_VOID, {0}};
-    uint32_t hash = hash_value(key);
+    uint32_t hash = hash_value(vm, key);
     int index = hash % map->capacity;
     while (map->entries[index].is_used) {
-        if (values_equal(map->entries[index].key, key)) {
+        if (values_equal(vm, map->entries[index].key, key)) {
             release(map->entries[index].key);
             release(map->entries[index].value);
             map->count--;
@@ -571,7 +587,7 @@ static Value native_delete(VM* vm, int arg_count, Value* args) {
                 j = (j + 1) % map->capacity;
                 if (!map->entries[j].is_used) break;
                 
-                uint32_t k_hash = hash_value(map->entries[j].key);
+                uint32_t k_hash = hash_value(vm, map->entries[j].key);
                 int k = k_hash % map->capacity;
                 
                 // Determine if k is cyclically between i and j
@@ -668,10 +684,9 @@ static char* type_to_string(Type t, char* buf) {
 }
 
 static Value native_has(VM* vm, int arg_count, Value* args) {
-    (void)vm;
-    if (arg_count != 2 || TYPE_KIND(args[0].type) != VAL_OBJ || args[0].as.obj->type != OBJ_MAP) return (Value){VAL_BOOL, {.b_val = false}};
+    if (arg_count != 2 || (TYPE_KIND(args[0].type) != VAL_OBJ && TYPE_KIND(args[0].type) != VAL_MAP) || args[0].as.obj->type != OBJ_MAP) return (Value){VAL_BOOL, {.b_val = false}};
     ObjMap* map = (ObjMap*)args[0].as.obj;
-    Value val = map_get(map, args[1]);
+    Value val = map_get(vm, map, args[1]);
     return (Value){VAL_BOOL, {.b_val = TYPE_KIND(val.type) != VAL_VOID}};
 }
 
@@ -968,7 +983,7 @@ static Value parse_object(VM* vm, const char** pp) {
         if (**pp == ':') (*pp)++;
         skip_space(pp);
         Value val = parse_value(vm, pp);
-        map_set(map, key, val);
+        map_set(vm, map, key, val);
         // map_set handles retains
         skip_space(pp);
         if (**pp == ',') { (*pp)++; skip_space(pp); }
@@ -1008,6 +1023,208 @@ static Value native_removeFile(VM* vm, int arg_count, Value* args) {
     } else {
         return wrap_err(vm, strerror(errno), VAL_BOOL);
     }
+}
+
+static Value native_tcpListen(VM* vm, int arg_count, Value* args) {
+    if (arg_count != 1 || TYPE_KIND(args[0].type) != VAL_INT) {
+        return wrap_err(vm, "tcpListen() expects 1 integer argument", VAL_INT);
+    }
+    int port = (int)args[0].as.i_val;
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) return wrap_err(vm, strerror(errno), VAL_INT);
+
+    int opt = 1;
+    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in serv_addr;
+    memset(&serv_addr, 0, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_addr.s_addr = INADDR_ANY;
+    serv_addr.sin_port = htons(port);
+
+    if (bind(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
+        close(sockfd);
+        return wrap_err(vm, strerror(errno), VAL_INT);
+    }
+
+    if (listen(sockfd, 64) < 0) {
+        close(sockfd);
+        return wrap_err(vm, strerror(errno), VAL_INT);
+    }
+
+    return wrap_ok(vm, (Value){VAL_INT, {.i_val = sockfd}}, VAL_INT);
+}
+
+static Value native_tcpAccept(VM* vm, int arg_count, Value* args) {
+    if (arg_count != 1 || TYPE_KIND(args[0].type) != VAL_INT) {
+        return wrap_err(vm, "tcpAccept() expects 1 integer argument", VAL_INT);
+    }
+    int listen_fd = (int)args[0].as.i_val;
+    struct sockaddr_in cli_addr;
+    socklen_t clilen = sizeof(cli_addr);
+    int newsockfd = accept(listen_fd, (struct sockaddr *)&cli_addr, &clilen);
+    if (newsockfd < 0) return wrap_err(vm, strerror(errno), VAL_INT);
+    return wrap_ok(vm, (Value){VAL_INT, {.i_val = newsockfd}}, VAL_INT);
+}
+
+static Value native_tcpRecv(VM* vm, int arg_count, Value* args) {
+    if (arg_count != 2 || TYPE_KIND(args[0].type) != VAL_INT || TYPE_KIND(args[1].type) != VAL_INT) {
+        return wrap_err(vm, "tcpRecv() expects 2 integer arguments (fd, max_len)", VAL_STR);
+    }
+    int fd = (int)args[0].as.i_val;
+    int max_len = (int)args[1].as.i_val;
+    char* buffer = malloc(max_len + 1);
+    ssize_t n = recv(fd, buffer, max_len, 0);
+    if (n < 0) {
+        free(buffer);
+        return wrap_err(vm, strerror(errno), VAL_STR);
+    }
+    buffer[n] = '\0';
+    ObjString* s = allocate_string(vm, buffer, (int)n);
+    free(buffer);
+    return wrap_ok(vm, (Value){VAL_OBJ, {.obj = (HeapObject*)s}}, VAL_STR);
+}
+
+static Value native_tcpSend(VM* vm, int arg_count, Value* args) {
+    if (arg_count != 2 || TYPE_KIND(args[0].type) != VAL_INT || !is_string(args[1])) {
+        return wrap_err(vm, "tcpSend() expects (fd: int, data: str)", VAL_INT);
+    }
+    int fd = (int)args[0].as.i_val;
+    const char* data = get_string_ptr(vm, args[1]);
+    int len = (TYPE_KIND(args[1].type) == VAL_OBJ) ? ((ObjString*)args[1].as.obj)->length : (int)strlen(data);
+    ssize_t n = send(fd, data, len, 0);
+    if (n < 0) return wrap_err(vm, strerror(errno), VAL_INT);
+    return wrap_ok(vm, (Value){VAL_INT, {.i_val = n}}, VAL_INT);
+}
+
+static Value native_httpParse(VM* vm, int arg_count, Value* args) {
+    if (arg_count != 1 || !is_string(args[0])) {
+        return wrap_err(vm, "httpParse() expects 1 string argument", VAL_MAP);
+    }
+    const char* raw = get_string_ptr(vm, args[0]);
+    int raw_len = (TYPE_KIND(args[0].type) == VAL_STR) ? (int)strlen(raw) : ((ObjString*)args[0].as.obj)->length;
+
+    ObjMap* map = allocate_map(vm);
+    
+    // Simple parsing
+    const char* end_of_first_line = strstr(raw, "\r\n");
+    if (!end_of_first_line) return wrap_err(vm, "Invalid HTTP request", VAL_MAP);
+
+    // Method
+    const char* first_space = strchr(raw, ' ');
+    if (first_space && first_space < end_of_first_line) {
+        ObjString* method = allocate_string(vm, raw, (int)(first_space - raw));
+        map_set(vm, map, (Value){VAL_OBJ, {.obj = (HeapObject*)allocate_string(vm, "method", 6)}}, (Value){VAL_OBJ, {.obj = (HeapObject*)method}});
+        
+        // Path
+        const char* second_space = strchr(first_space + 1, ' ');
+        if (second_space && second_space < end_of_first_line) {
+            ObjString* path = allocate_string(vm, first_space + 1, (int)(second_space - (first_space + 1)));
+            map_set(vm, map, (Value){VAL_OBJ, {.obj = (HeapObject*)allocate_string(vm, "path", 4)}}, (Value){VAL_OBJ, {.obj = (HeapObject*)path}});
+        }
+    }
+
+    // Headers and Body
+    const char* header_start = end_of_first_line + 2;
+    const char* body_start = strstr(header_start, "\r\n\r\n");
+    
+    ObjMap* headers_map = allocate_map(vm);
+    const char* current_line = header_start;
+    while (current_line < (body_start ? body_start : raw + raw_len)) {
+        const char* next_line = strstr(current_line, "\r\n");
+        if (!next_line || next_line == current_line) break;
+        
+        const char* colon = strchr(current_line, ':');
+        if (colon && colon < next_line) {
+            ObjString* key = allocate_string(vm, current_line, (int)(colon - current_line));
+            const char* val_start = colon + 1;
+            while (*val_start == ' ') val_start++;
+            ObjString* val = allocate_string(vm, val_start, (int)(next_line - val_start));
+            map_set(vm, headers_map, (Value){VAL_OBJ, {.obj = (HeapObject*)key}}, (Value){VAL_OBJ, {.obj = (HeapObject*)val}});
+        }
+        current_line = next_line + 2;
+    }
+    map_set(vm, map, (Value){VAL_OBJ, {.obj = (HeapObject*)allocate_string(vm, "headers", 7)}}, (Value){VAL_MAP, {.obj = (HeapObject*)headers_map}});
+
+    if (body_start) {
+        int body_len = (int)(raw + raw_len - (body_start + 4));
+        ObjString* body = allocate_string(vm, body_start + 4, body_len);
+        map_set(vm, map, (Value){VAL_OBJ, {.obj = (HeapObject*)allocate_string(vm, "body", 4)}}, (Value){VAL_OBJ, {.obj = (HeapObject*)body}});
+    } else {
+        map_set(vm, map, (Value){VAL_OBJ, {.obj = (HeapObject*)allocate_string(vm, "body", 4)}}, (Value){VAL_OBJ, {.obj = (HeapObject*)allocate_string(vm, "", 0)}});
+    }
+
+    return wrap_ok(vm, (Value){VAL_MAP, {.obj = (HeapObject*)map}}, VAL_MAP);
+}
+
+static Value native_httpFormat(VM* vm, int arg_count, Value* args) {
+    if (arg_count != 1 || TYPE_KIND(args[0].type) != VAL_MAP) {
+        return (Value){VAL_VOID, {0}};
+    }
+    ObjMap* map = (ObjMap*)args[0].as.obj;
+    
+    int status = 200;
+    ObjString* s_status = allocate_string(vm, "status", 6);
+    Value v_status = map_get(vm, map, (Value){VAL_OBJ, {.obj = (HeapObject*)s_status}});
+    if (TYPE_KIND(v_status.type) == VAL_INT) status = (int)v_status.as.i_val;
+    free_object((HeapObject*)s_status);
+
+    ObjString* s_body_k = allocate_string(vm, "body", 4);
+    Value v_body = map_get(vm, map, (Value){VAL_OBJ, {.obj = (HeapObject*)s_body_k}});
+    const char* body = is_string(v_body) ? get_string_ptr(vm, v_body) : "";
+    int body_len = is_string(v_body) ? (TYPE_KIND(v_body.type) == VAL_STR ? (int)strlen(body) : ((ObjString*)v_body.as.obj)->length) : 0;
+    free_object((HeapObject*)s_body_k);
+
+    StringBuilder sb;
+    sb_init(&sb);
+    
+    char head[128];
+    const char* status_text = "OK";
+    if (status == 404) status_text = "Not Found";
+    else if (status == 500) status_text = "Internal Server Error";
+    else if (status == 400) status_text = "Bad Request";
+    
+    sprintf(head, "HTTP/1.1 %d %s\r\n", status, status_text);
+    sb_append(&sb, head);
+    
+    ObjString* s_headers_k = allocate_string(vm, "headers", 7);
+    Value v_headers = map_get(vm, map, (Value){VAL_OBJ, {.obj = (HeapObject*)s_headers_k}});
+    if (TYPE_KIND(v_headers.type) == VAL_MAP) {
+        ObjMap* h_map = (ObjMap*)v_headers.as.obj;
+        for (int i = 0; i < h_map->capacity; i++) {
+            if (h_map->entries[i].is_used) {
+                Value sk = native_str(vm, 1, &h_map->entries[i].key);
+                Value sv = native_str(vm, 1, &h_map->entries[i].value);
+                sb_append(&sb, ((ObjString*)sk.as.obj)->chars);
+                sb_append(&sb, ": ");
+                sb_append(&sb, ((ObjString*)sv.as.obj)->chars);
+                sb_append(&sb, "\r\n");
+                release(sk); release(sv);
+            }
+        }
+    }
+    free_object((HeapObject*)s_headers_k);
+    
+    char content_len[64];
+    sprintf(content_len, "Content-Length: %d\r\n\r\n", body_len);
+    sb_append(&sb, content_len);
+    
+    ObjString* res = allocate_string(vm, NULL, sb.length + body_len);
+    memcpy(res->chars, sb.data, sb.length);
+    memcpy(res->chars + sb.length, body, body_len);
+    
+    free(sb.data);
+    return (Value){VAL_OBJ, {.obj = (HeapObject*)res}};
+}
+
+static Value native_tcpClose(VM* vm, int arg_count, Value* args) {
+    if (arg_count != 1 || TYPE_KIND(args[0].type) != VAL_INT) {
+        runtime_error(vm, "tcpClose() expects 1 integer argument");
+        return (Value){VAL_VOID, {0}};
+    }
+    int fd = (int)args[0].as.i_val;
+    close(fd);
+    return (Value){VAL_VOID, {0}};
 }
 
 static Value native_listDir(VM* vm, int arg_count, Value* args) {
@@ -1238,6 +1455,13 @@ void vm_init(VM* vm, uint8_t* code, char** strings, int strings_count, int argc,
     vm_define_native(vm, "fileExists", native_fileExists, 35);
     vm_define_native(vm, "removeFile", native_removeFile, 36);
     vm_define_native(vm, "listDir", native_listDir, 37);
+    vm_define_native(vm, "tcpListen", native_tcpListen, 38);
+    vm_define_native(vm, "tcpAccept", native_tcpAccept, 39);
+    vm_define_native(vm, "tcpRecv", native_tcpRecv, 40);
+    vm_define_native(vm, "tcpSend", native_tcpSend, 41);
+    vm_define_native(vm, "tcpClose", native_tcpClose, 42);
+    vm_define_native(vm, "httpParse", native_httpParse, 43);
+    vm_define_native(vm, "httpFormat", native_httpFormat, 44);
 }
 
 typedef struct {
@@ -1382,6 +1606,7 @@ void vm_run(VM* vm) {
                 Value val = vm_pop(vm);
                 Value s = native_str(vm, 1, &val);
                 printf("%s\n", ((ObjString*)s.as.obj)->chars);
+                fflush(stdout);
                 release(s);
                 release(val);
                 break;
@@ -1484,18 +1709,20 @@ void vm_run(VM* vm) {
                     vm_push(vm, (Value){VAL_INT, {.i_val = a.as.i_val + b.as.i_val}});
                 } else if (TYPE_KIND(a.type) == VAL_FLT && TYPE_KIND(b.type) == VAL_FLT) {
                     vm_push(vm, (Value){VAL_FLT, {.f_val = a.as.f_val + b.as.f_val}});
-                } else if (is_string(a) && is_string(b)) {
-                    const char* sa = get_string_ptr(vm, a);
-                    const char* sb = get_string_ptr(vm, b);
-                    int la = (TYPE_KIND(a.type) == VAL_STR) ? (int)strlen(sa) : ((ObjString*)a.as.obj)->length;
-                    int lb = (TYPE_KIND(b.type) == VAL_STR) ? (int)strlen(sb) : ((ObjString*)b.as.obj)->length;
+                } else if (is_string(a) || is_string(b)) {
+                    Value v_sa = native_str(vm, 1, &a);
+                    Value v_sb = native_str(vm, 1, &b);
+                    const char* sa = ((ObjString*)v_sa.as.obj)->chars;
+                    const char* sb = ((ObjString*)v_sb.as.obj)->chars;
+                    int la = ((ObjString*)v_sa.as.obj)->length;
+                    int lb = ((ObjString*)v_sb.as.obj)->length;
                     ObjString* res = allocate_string(vm, NULL, la + lb);
                     memcpy(res->chars, sa, la);
                     memcpy(res->chars + la, sb, lb);
                     vm_push(vm, (Value){VAL_OBJ, {.obj = (HeapObject*)res}});
+                    release(v_sa); release(v_sb);
                 } else {
-                    fprintf(stderr, "Type error in ADD\n");
-                    exit(1);
+                    runtime_error(vm, "Type error in ADD: %d + %d", TYPE_KIND(a.type), TYPE_KIND(b.type));
                 }
                 release(a); release(b);
                 break;
@@ -1556,7 +1783,7 @@ void vm_run(VM* vm) {
             case OP_EQ: {
                 Value b = vm_pop(vm);
                 Value a = vm_pop(vm);
-                vm_push(vm, (Value){VAL_BOOL, {.b_val = values_equal(a, b)}});
+                vm_push(vm, (Value){VAL_BOOL, {.b_val = values_equal(vm, a, b)}});
                 release(a); release(b);
                 break;
             }
@@ -1672,7 +1899,7 @@ void vm_run(VM* vm) {
                     vm_push(vm, (Value){VAL_OBJ, {.obj = (HeapObject*)res}});
                 } else if ((TYPE_KIND(obj.type) == VAL_OBJ || TYPE_KIND(obj.type) == VAL_MAP) && obj.as.obj->type == OBJ_MAP) {
                     ObjMap* map = (ObjMap*)obj.as.obj;
-                    Value val = map_get(map, index);
+                    Value val = map_get(vm, map, index);
                     if (TYPE_KIND(val.type) == VAL_VOID) {
                         release(obj); release(index);
                         runtime_error(vm, "Key not found in map");
@@ -1765,7 +1992,7 @@ void vm_run(VM* vm) {
                     array->items[idx] = val;
                 } else if ((TYPE_KIND(obj.type) == VAL_OBJ || TYPE_KIND(obj.type) == VAL_MAP) && obj.as.obj->type == OBJ_MAP) {
                     ObjMap* map = (ObjMap*)obj.as.obj;
-                    map_set(map, index, val);
+                    map_set(vm, map, index, val);
                 } else { 
                     release(obj); release(index); release(val);
                     runtime_error(vm, "Can only set index on arrays or maps");
@@ -1789,11 +2016,10 @@ void vm_run(VM* vm) {
                 ObjStruct* st = malloc(sizeof(ObjStruct));
                 st->obj.type = OBJ_STRUCT; st->obj.ref_count = 0;
                 st->field_count = field_count;
-                st->fields = malloc(sizeof(char*) * field_count);
+                st->fields = calloc(field_count, sizeof(char*));
                 st->values = malloc(sizeof(Value) * field_count);
                 for (int i = field_count - 1; i >= 0; i--) {
                     st->values[i] = vm_pop(vm);
-                    st->fields[i] = NULL;
                 }
                 vm_push(vm, (Value){VAL_OBJ, {.obj = (HeapObject*)st}});
                 break;
@@ -1805,7 +2031,7 @@ void vm_run(VM* vm) {
                 for (int i = 0; i < pair_count; i++) {
                     Value val = vm_pop(vm);
                     Value key = vm_pop(vm);
-                    map_set(map, key, val);
+                    map_set(vm, map, key, val);
                     release(key); release(val);
                 }
                 vm_push(vm, (Value){type, {.obj = (HeapObject*)map}});
@@ -1854,10 +2080,16 @@ void vm_run(VM* vm) {
                 break;
             }
             case OP_AS_TYPE: {
-                Type type = (Type)read_int32(vm);
+                Type target_type = (Type)read_int32(vm);
                 Value val = vm_pop(vm);
-                val.type = type;
-                vm_push(vm, val);
+                // If casting to str and it's already a heap string, keep it as OBJ
+                if (TYPE_KIND(target_type) == VAL_STR && TYPE_KIND(val.type) == VAL_OBJ && 
+                    val.as.obj != NULL && val.as.obj->type == OBJ_STRING) {
+                    vm_push(vm, val);
+                } else {
+                    val.type = target_type;
+                    vm_push(vm, val);
+                }
                 break;
             }
             case OP_IS_TRUTHY: {

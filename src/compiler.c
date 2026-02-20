@@ -264,7 +264,8 @@ static bool is_assignable(Type expected, Type actual) {
         if (TYPE_KIND(actual) == VAL_OBJ && TYPE_SUB(expected) == 0) return true; // Legacy
         if (TYPE_KIND(actual) == VAL_MAP) {
             if (TYPE_SUB(expected) == 0 || TYPE_SUB(expected) == VAL_ANY) return true;
-            return TYPE_SUB(expected) == TYPE_SUB(actual) && TYPE_KEY(expected) == TYPE_KEY(actual);
+            if (TYPE_SUB(actual) == 0 || TYPE_SUB(actual) == VAL_VOID || TYPE_SUB(actual) == VAL_ANY) return true;
+            return TYPE_SUB(expected) == TYPE_SUB(actual) && (TYPE_KEY(expected) == TYPE_KEY(actual) || TYPE_KEY(actual) == VAL_ANY);
         }
     }
 
@@ -450,6 +451,29 @@ static Type parse_type() {
                     }
                 }
             }
+            if (!found && active_prefix != NULL) {
+                char full_name[256];
+                strcpy(full_name, active_prefix);
+                strncat(full_name, t.start, t.length);
+                for (int i = 0; i < current_compiler->struct_count; i++) {
+                    if (current_compiler->structs[i].name.length == (int)strlen(full_name) &&
+                        memcmp(current_compiler->structs[i].name.start, full_name, strlen(full_name)) == 0) {
+                        type = VAL_OBJ;
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    for (int i = 0; i < current_compiler->enum_count; i++) {
+                        if (current_compiler->enums[i].name.length == (int)strlen(full_name) &&
+                            memcmp(current_compiler->enums[i].name.start, full_name, strlen(full_name)) == 0) {
+                            type = MAKE_TYPE(VAL_ENUM, i, 0);
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
             if (!found) {
                 error_at(&t, "Unknown type.");
                 return VAL_VOID;
@@ -473,6 +497,7 @@ static Type parse_type() {
 typedef enum {
     PREC_NONE,
     PREC_ASSIGNMENT,  // =>
+    PREC_AS,          // as
     PREC_POSTFIX,     // !!
     PREC_OR,          // ||
     PREC_AND,         // &&
@@ -513,15 +538,12 @@ static void binary() {
         case TOKEN_MINUS:
         case TOKEN_STAR:
         case TOKEN_SLASH:
-            if (operator_type == TOKEN_PLUS && a == VAL_STR && b == VAL_STR) {
+            if (operator_type == TOKEN_PLUS && (a == VAL_STR || b == VAL_STR || a == VAL_ANY || b == VAL_ANY)) {
                 emit_byte(OP_ADD);
                 type_push(VAL_STR);
             } else {
-                if (a != b) {
+                if (a != b && a != VAL_ANY && b != VAL_ANY) {
                     error_at(&parser.previous, "Arithmetic type error.");
-                }
-                if (a == VAL_ANY) {
-                    error_at(&parser.previous, "Cannot use 'any' in arithmetic. Match it first.");
                 }
                 if (operator_type == TOKEN_PLUS) emit_byte(OP_ADD);
                 else if (operator_type == TOKEN_MINUS) emit_byte(OP_SUB);
@@ -543,10 +565,7 @@ static void binary() {
         case TOKEN_RANGLE:
         case TOKEN_LTE:
         case TOKEN_GTE:
-            if (a != b) error_at(&parser.previous, "Comparison type error.");
-            if (a == VAL_ANY && operator_type != TOKEN_EQ_EQ && operator_type != TOKEN_BANG_EQ) {
-                error_at(&parser.previous, "Cannot compare 'any' values. Match them first.");
-            }
+            if (a != b && a != VAL_ANY && b != VAL_ANY) error_at(&parser.previous, "Comparison type error.");
             if (operator_type == TOKEN_EQ_EQ) emit_byte(OP_EQ);
             else if (operator_type == TOKEN_BANG_EQ) {
                 emit_byte(OP_EQ);
@@ -620,8 +639,8 @@ static void array_literal() {
 
 static void map_literal() {
     int count = 0;
-    Type key_type = VAL_ANY;
-    Type val_type = VAL_ANY;
+    Type key_type = VAL_VOID;
+    Type val_type = VAL_VOID;
     if (parser.current.type != TOKEN_RBRACE) {
         do {
             parse_precedence(PREC_OR);
@@ -1129,6 +1148,19 @@ static void variable() {
         }
     }
 
+    // Try with active prefix if not found
+    if (s_idx == -1 && active_prefix != NULL) {
+        char full_name[256];
+        strcpy(full_name, active_prefix);
+        strncat(full_name, name.start, name.length);
+        for (int i = 0; i < current_compiler->struct_count; i++) {
+            if (current_compiler->structs[i].name.length == (int)strlen(full_name) &&
+                memcmp(current_compiler->structs[i].name.start, full_name, strlen(full_name)) == 0) {
+                s_idx = i; break;
+            }
+        }
+    }
+
     if (s_idx != -1) {
         StructDef* sd = &current_compiler->structs[s_idx];
         if (match(TOKEN_LPAREN)) {
@@ -1211,6 +1243,14 @@ static void variable() {
     }
 
     error_at(&name, "Undefined identifier.");
+}
+
+static void as_op() {
+    Type target_type = parse_type();
+    emit_byte(OP_AS_TYPE);
+    emit_int32(target_type);
+    type_pop();
+    type_push(target_type);
 }
 
 static void assignment() {
@@ -1408,6 +1448,7 @@ ParseRule rules[] = {
     [TOKEN_OK]        = {ok_expr,   NULL,      PREC_NONE},
     [TOKEN_ERR]       = {err_expr,  NULL,      PREC_NONE},
     [TOKEN_CHAN]      = {chan_expr, NULL,      PREC_NONE},
+    [TOKEN_AS]        = {NULL,     as_op,      PREC_AS},
     [TOKEN_ENUM]      = {NULL,     NULL,       PREC_NONE},
     [TOKEN_MATCH]     = {NULL,     NULL,       PREC_NONE},
     [TOKEN_EOF]       = {NULL,     NULL,       PREC_NONE},
@@ -1481,7 +1522,13 @@ static void compile_internal(const char* prefix) {
             sd->is_public = is_public;
             while (parser.current.type != TOKEN_RBRACKET) {
                 consume(TOKEN_ID, "Expect field name.");
-                sd->fields[sd->field_count] = parser.previous;
+                Token field_name = parser.previous;
+                char* field_start = malloc(field_name.length + 1);
+                memcpy(field_start, field_name.start, field_name.length);
+                field_start[field_name.length] = '\0';
+                sd->fields[sd->field_count] = field_name;
+                sd->fields[sd->field_count].start = field_start;
+                
                 consume(TOKEN_COLON, "Expect ':'.");
                 sd->field_types[sd->field_count] = parse_type();
                 sd->field_count++;
@@ -1514,7 +1561,13 @@ static void compile_internal(const char* prefix) {
             ed->is_public = is_public;
             while (parser.current.type != TOKEN_RBRACKET) {
                 consume(TOKEN_ID, "Expect variant name.");
-                ed->variants[ed->variant_count] = parser.previous;
+                Token variant_name = parser.previous;
+                char* v_start = malloc(variant_name.length + 1);
+                memcpy(v_start, variant_name.start, variant_name.length);
+                v_start[variant_name.length] = '\0';
+                ed->variants[ed->variant_count] = variant_name;
+                ed->variants[ed->variant_count].start = v_start;
+                
                 if (match(TOKEN_LPAREN)) {
                     ed->has_payload[ed->variant_count] = true;
                     ed->payload_types[ed->variant_count] = parse_type();
@@ -2081,6 +2134,13 @@ Chunk* compiler_compile(const char* source, const char* base_dir, const char* st
     add_native("fileExists", 35, VAL_BOOL, 1, VAL_STR);
     add_native("removeFile", 36, MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, VAL_BOOL), 1, VAL_STR);
     add_native("listDir", 37, MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, VAL_OBJ), 1, VAL_STR);
+    add_native("tcpListen", 38, MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, VAL_INT), 1, VAL_INT);
+    add_native("tcpAccept", 39, MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, VAL_INT), 1, VAL_INT);
+    add_native("tcpRecv", 40, MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, VAL_STR), 2, VAL_INT, VAL_INT);
+    add_native("tcpSend", 41, MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, VAL_INT), 2, VAL_INT, VAL_STR);
+    add_native("tcpClose", 42, VAL_VOID, 1, VAL_INT);
+    add_native("httpParse", 43, MAKE_TYPE(VAL_ENUM, RESULT_ENUM_ID, VAL_MAP), 1, VAL_STR);
+    add_native("httpFormat", 44, VAL_STR, 1, VAL_MAP);
 
     parser.had_error = false;
     parser.panic_mode = false;

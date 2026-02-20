@@ -6,7 +6,7 @@ Opo allows calling C functions from shared libraries using the `ffiLoad` and `ff
 
 Loads a shared library (`.so` or `.dll`).
 - `path`: The path to the shared library file. If an empty string `""` is provided, it loads the current process's symbols.
-- Returns an `int` handle to the library.
+- Returns an `int!` handle to the library.
 
 ## `ffiCall(handle: int, name: str, arg_types: str, ret_type: str, args...) -> any`
 
@@ -31,12 +31,25 @@ Calls a function from a loaded library.
 ```opo
 <> -> void: main [
     # Load libc
-    ffiLoad("") => libc: int
-    
-    # Call 'puts' from libc
-    ffiCall(libc, "puts", "s", "i", "Hello from Opo FFI!") !!
-    
-    # Call 'abs' from libc
-    ffiCall(libc, "abs", "i", "i", -42) !! # Prints 42
+
+    match ffiLoad("")[
+        ok(libc)[
+            # Call 'puts' from libc
+            ffiCall(libc, "puts", "s", "i", "Hello from Opo FFI!")
+
+            # Call 'abs' from libc
+            match ffiCall(libc, "abs", "i", "i", -42)[
+                ok(x)[
+                    println(x) # Prints 42
+                ]
+                err(e)[
+                    println("Fail: "+e)
+                ]
+            ]
+        ]
+        err(e)[
+            println("Fail: "+e)
+        ]
+    ]
 ]
 ```
