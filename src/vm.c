@@ -1619,8 +1619,9 @@ void vm_run(VM* vm) {
                 } else if (TYPE_KIND(a.type) == VAL_FLT && TYPE_KIND(b.type) == VAL_FLT) {
                     vm_push(vm, (Value){VAL_BOOL, {.b_val = a.as.f_val <= b.as.f_val}});
                 } else {
-                    fprintf(stderr, "Type error in LTE\n");
-                    exit(1);
+                    release(a); release(b);
+                    runtime_error(vm, "Type error in LTE: types %d and %d are incompatible.", TYPE_KIND(a.type), TYPE_KIND(b.type));
+                    break;
                 }
                 release(a); release(b);
                 break;
@@ -1633,8 +1634,9 @@ void vm_run(VM* vm) {
                 } else if (TYPE_KIND(a.type) == VAL_FLT && TYPE_KIND(b.type) == VAL_FLT) {
                     vm_push(vm, (Value){VAL_BOOL, {.b_val = a.as.f_val >= b.as.f_val}});
                 } else {
-                    fprintf(stderr, "Type error in GTE\n");
-                    exit(1);
+                    release(a); release(b);
+                    runtime_error(vm, "Type error in GTE: types %d and %d are incompatible.", TYPE_KIND(a.type), TYPE_KIND(b.type));
+                    break;
                 }
                 release(a); release(b);
                 break;
@@ -1646,8 +1648,9 @@ void vm_run(VM* vm) {
                 } else if (TYPE_KIND(a.type) == VAL_FLT) {
                     vm_push(vm, (Value){VAL_FLT, {.f_val = -a.as.f_val}});
                 } else {
-                    fprintf(stderr, "Type error in NEG\n");
-                    exit(1);
+                    release(a);
+                    runtime_error(vm, "Type error in NEG: operand must be numeric.");
+                    break;
                 }
                 release(a);
                 break;
@@ -1657,13 +1660,15 @@ void vm_run(VM* vm) {
                 Value a = vm_pop(vm);
                 if (TYPE_KIND(a.type) == VAL_INT && TYPE_KIND(b.type) == VAL_INT) {
                     if (b.as.i_val == 0) {
-                        fprintf(stderr, "Division by zero\n");
-                        exit(1);
+                        release(a); release(b);
+                        runtime_error(vm, "Division by zero in MOD");
+                        break;
                     }
                     vm_push(vm, (Value){VAL_INT, {.i_val = a.as.i_val % b.as.i_val}});
                 } else {
-                    fprintf(stderr, "Type error in MOD\n");
-                    exit(1);
+                    release(a); release(b);
+                    runtime_error(vm, "Type error in MOD: operands must be integers.");
+                    break;
                 }
                 release(a); release(b);
                 break;
@@ -1696,8 +1701,9 @@ void vm_run(VM* vm) {
                 } else if (TYPE_KIND(a.type) == VAL_FLT && TYPE_KIND(b.type) == VAL_FLT) {
                     vm_push(vm, (Value){VAL_BOOL, {.b_val = a.as.f_val > b.as.f_val}});
                 } else {
-                    fprintf(stderr, "Type error in GT\n");
-                    exit(1);
+                    release(a); release(b);
+                    runtime_error(vm, "Type error in GT: types %d and %d are incompatible.", TYPE_KIND(a.type), TYPE_KIND(b.type));
+                    break;
                 }
                 release(a); release(b);
                 break;
@@ -1709,7 +1715,7 @@ void vm_run(VM* vm) {
                     vm_push(vm, (Value){VAL_INT, {.i_val = a.as.i_val + b.as.i_val}});
                 } else if (TYPE_KIND(a.type) == VAL_FLT && TYPE_KIND(b.type) == VAL_FLT) {
                     vm_push(vm, (Value){VAL_FLT, {.f_val = a.as.f_val + b.as.f_val}});
-                } else if (is_string(a) || is_string(b)) {
+                } else if (is_string(a) && is_string(b)) {
                     Value v_sa = native_str(vm, 1, &a);
                     Value v_sb = native_str(vm, 1, &b);
                     const char* sa = ((ObjString*)v_sa.as.obj)->chars;
@@ -1722,7 +1728,9 @@ void vm_run(VM* vm) {
                     vm_push(vm, (Value){VAL_OBJ, {.obj = (HeapObject*)res}});
                     release(v_sa); release(v_sb);
                 } else {
-                    runtime_error(vm, "Type error in ADD: %d + %d", TYPE_KIND(a.type), TYPE_KIND(b.type));
+                    release(a); release(b);
+                    runtime_error(vm, "Type error in ADD: incompatible types %d and %d.", TYPE_KIND(a.type), TYPE_KIND(b.type));
+                    break;
                 }
                 release(a); release(b);
                 break;
@@ -1735,8 +1743,9 @@ void vm_run(VM* vm) {
                 } else if (TYPE_KIND(a.type) == VAL_FLT && TYPE_KIND(b.type) == VAL_FLT) {
                     vm_push(vm, (Value){VAL_FLT, {.f_val = a.as.f_val - b.as.f_val}});
                 } else {
-                    fprintf(stderr, "Type error in SUB\n");
-                    exit(1);
+                    release(a); release(b);
+                    runtime_error(vm, "Type error in SUB: operands must be numeric and compatible.");
+                    break;
                 }
                 release(a); release(b);
                 break;
@@ -1749,8 +1758,9 @@ void vm_run(VM* vm) {
                 } else if (TYPE_KIND(a.type) == VAL_FLT && TYPE_KIND(b.type) == VAL_FLT) {
                     vm_push(vm, (Value){VAL_FLT, {.f_val = a.as.f_val * b.as.f_val}});
                 } else {
-                    fprintf(stderr, "Type error in MUL\n");
-                    exit(1);
+                    release(a); release(b);
+                    runtime_error(vm, "Type error in MUL: operands must be numeric and compatible.");
+                    break;
                 }
                 release(a); release(b);
                 break;
@@ -1795,8 +1805,9 @@ void vm_run(VM* vm) {
                 } else if (TYPE_KIND(a.type) == VAL_FLT && TYPE_KIND(b.type) == VAL_FLT) {
                     vm_push(vm, (Value){VAL_BOOL, {.b_val = a.as.f_val < b.as.f_val}});
                 } else {
-                    fprintf(stderr, "Type error in LT\n");
-                    exit(1);
+                    release(a); release(b);
+                    runtime_error(vm, "Type error in LT: types %d and %d are incompatible.", TYPE_KIND(a.type), TYPE_KIND(b.type));
+                    break;
                 }
                 release(a); release(b);
                 break;

@@ -538,23 +538,40 @@ static void binary() {
         case TOKEN_MINUS:
         case TOKEN_STAR:
         case TOKEN_SLASH:
-            if (operator_type == TOKEN_PLUS && (a == VAL_STR || b == VAL_STR || a == VAL_ANY || b == VAL_ANY)) {
-                emit_byte(OP_ADD);
-                type_push(VAL_STR);
-            } else {
-                if (a != b && a != VAL_ANY && b != VAL_ANY) {
-                    error_at(&parser.previous, "Arithmetic type error.");
+            if (a == VAL_ANY || b == VAL_ANY) {
+                error_at(&parser.previous, "Cannot perform arithmetic on 'any'. Match it to a concrete type first.");
+            }
+            if (operator_type == TOKEN_PLUS) {
+                if (a == VAL_STR && b == VAL_STR) {
+                    emit_byte(OP_ADD);
+                    type_push(VAL_STR);
+                } else {
+                    if (a != b) {
+                        error_at(&parser.previous, "Arithmetic type error: mismatched types.");
+                    } else if (a != VAL_INT && a != VAL_FLT) {
+                        error_at(&parser.previous, "Arithmetic type error: operator + not supported for this type.");
+                    }
+                    emit_byte(OP_ADD);
+                    type_push(a);
                 }
-                if (operator_type == TOKEN_PLUS) emit_byte(OP_ADD);
-                else if (operator_type == TOKEN_MINUS) emit_byte(OP_SUB);
+            } else {
+                if (a != b) {
+                    error_at(&parser.previous, "Arithmetic type error.");
+                } else if (a != VAL_INT && a != VAL_FLT) {
+                    error_at(&parser.previous, "Arithmetic type error: operator not supported for this type.");
+                }
+                if (operator_type == TOKEN_MINUS) emit_byte(OP_SUB);
                 else if (operator_type == TOKEN_STAR) emit_byte(OP_MUL);
                 else if (operator_type == TOKEN_SLASH) emit_byte(OP_DIV);
                 type_push(a);
             }
             break;
         case TOKEN_PERCENT:
+            if (a == VAL_ANY || b == VAL_ANY) {
+                error_at(&parser.previous, "Cannot perform modulo on 'any'. Match it to 'int' first.");
+            }
             if (a != VAL_INT || b != VAL_INT) {
-                error_at(&parser.previous, "Modulo type error.");
+                error_at(&parser.previous, "Modulo type error: operands must be integers.");
             }
             emit_byte(OP_MOD);
             type_push(VAL_INT);
@@ -565,7 +582,10 @@ static void binary() {
         case TOKEN_RANGLE:
         case TOKEN_LTE:
         case TOKEN_GTE:
-            if (a != b && a != VAL_ANY && b != VAL_ANY) error_at(&parser.previous, "Comparison type error.");
+            if (a == VAL_ANY || b == VAL_ANY) {
+                error_at(&parser.previous, "Cannot compare 'any'. Match it to a concrete type first.");
+            }
+            if (a != b) error_at(&parser.previous, "Comparison type error.");
             if (operator_type == TOKEN_EQ_EQ) emit_byte(OP_EQ);
             else if (operator_type == TOKEN_BANG_EQ) {
                 emit_byte(OP_EQ);
@@ -579,7 +599,12 @@ static void binary() {
             break;
         case TOKEN_AND:
         case TOKEN_OR:
-            if (a != VAL_BOOL || b != VAL_BOOL) error_at(&parser.previous, "Logic type error.");
+            if (a == VAL_ANY || b == VAL_ANY) {
+                error_at(&parser.previous, "Cannot perform logical operations on 'any'. Match it to 'bol' first.");
+            }
+            if (a != VAL_BOOL || b != VAL_BOOL) {
+                error_at(&parser.previous, "Logic type error: operands must be booleans.");
+            }
             emit_byte(operator_type == TOKEN_AND ? OP_AND : OP_OR);
             type_push(VAL_BOOL);
             break;
@@ -592,9 +617,15 @@ static void unary() {
     parse_precedence(PREC_UNARY);
     Type t = type_pop();
     if (operator_type == TOKEN_MINUS) {
+        if (t == VAL_ANY) {
+            error_at(&parser.previous, "Cannot negate 'any'. Match it to a numeric type first.");
+        }
         if (t != VAL_INT && t != VAL_FLT) error_at(&parser.previous, "Operand must be a number.");
         emit_byte(OP_NEG);
     } else if (operator_type == TOKEN_BANG) {
+        if (t == VAL_ANY) {
+            error_at(&parser.previous, "Cannot use '!' on 'any'. Match it to 'bol' first.");
+        }
         if (t != VAL_BOOL) error_at(&parser.previous, "Operand must be a boolean.");
         emit_byte(OP_NOT);
     }
@@ -1363,7 +1394,10 @@ static void assignment() {
 }
 
 static void print_op() {
-    type_pop();
+    Type t = type_pop();
+    if (t == VAL_ANY) {
+        error_at(&parser.previous, "Cannot print 'any'. Match it to a concrete type first.");
+    }
     emit_byte(OP_PRINT);
     type_push(VAL_VOID);
 }
