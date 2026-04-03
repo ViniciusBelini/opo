@@ -47,12 +47,17 @@ typedef struct {
     const char* start;
     int length;
     int line;
+    int column;
 } Token;
 
 typedef struct {
+    const char* source_start;
     const char* start;
     const char* current;
     int line;
+    int column;
+    int token_line;
+    int token_column;
 } Lexer;
 
 extern Lexer lexer;

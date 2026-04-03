@@ -7,9 +7,11 @@
 Lexer lexer;
 
 void lexer_init(const char* source) {
+    lexer.source_start = source;
     lexer.start = source;
     lexer.current = source;
     lexer.line = 1;
+    lexer.column = 1;
 }
 
 static bool is_at_end() {
@@ -18,6 +20,7 @@ static bool is_at_end() {
 
 static char advance() {
     lexer.current++;
+    lexer.column++;
     return lexer.current[-1];
 }
 
@@ -42,7 +45,8 @@ static Token make_token(TokenType type) {
     token.type = type;
     token.start = lexer.start;
     token.length = (int)(lexer.current - lexer.start);
-    token.line = lexer.line;
+    token.line = lexer.token_line;
+    token.column = lexer.token_column;
     return token;
 }
 
@@ -52,6 +56,7 @@ static Token error_token(const char* message) {
     token.start = message;
     token.length = (int)strlen(message);
     token.line = lexer.line;
+    token.column = lexer.column;
     return token;
 }
 
@@ -66,6 +71,7 @@ static void skip_whitespace() {
                 break;
             case '\n':
                 lexer.line++;
+                lexer.column = 1;
                 advance();
                 break;
             case '#': // Comment
@@ -79,7 +85,10 @@ static void skip_whitespace() {
 
 static Token string() {
     while (peek() != '"' && !is_at_end()) {
-        if (peek() == '\n') lexer.line++;
+        if (peek() == '\n') {
+            lexer.line++;
+            lexer.column = 1;
+        }
         advance();
     }
     if (is_at_end()) return error_token("Unterminated string.");
@@ -163,6 +172,8 @@ static Token identifier() {
 Token lexer_next_token() {
     skip_whitespace();
     lexer.start = lexer.current;
+    lexer.token_line = lexer.line;
+    lexer.token_column = lexer.column;
     if (is_at_end()) return make_token(TOKEN_EOF);
 
     char c = advance();

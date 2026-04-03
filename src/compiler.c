@@ -92,15 +92,44 @@ static const char* active_prefix = NULL;
 static void error_at(Token* token, const char* message) {
     if (parser.panic_mode) return;
     parser.panic_mode = true;
-    fprintf(stderr, "[%s:line %d] Error", active_prefix ? active_prefix : "main", token->line);
-    if (token->type == TOKEN_EOF) {
-        fprintf(stderr, " at end");
-    } else if (token->type == TOKEN_ERROR) {
-        // Nothing.
-    } else {
-        fprintf(stderr, " at '%.*s'", token->length, token->start);
+
+    // ANSI color codes
+    const char* red = "\033[1;31m";
+    const char* blue = "\033[1;34m";
+    const char* reset = "\033[0m";
+    const char* bold = "\033[1m";
+
+    fprintf(stderr, "%serror%s: %s%s%s\n", red, reset, bold, message, reset);
+    fprintf(stderr, "  %s-->%s %s:%d:%d\n", blue, reset, active_prefix ? active_prefix : "main", token->line, token->column);
+
+    // Find the start of the line
+    const char* line_start = token->start;
+    while (line_start > lexer.source_start && *(line_start - 1) != '\n') {
+        line_start--;
     }
-    fprintf(stderr, ": %s\n", message);
+
+    // Find the end of the line
+    const char* line_end = token->start;
+    while (*line_end != '\n' && *line_end != '\0') {
+        line_end++;
+    }
+
+    int line_length = (int)(line_end - line_start);
+    fprintf(stderr, "   %s|%s\n", blue, reset);
+    fprintf(stderr, "%2d %s|%s %.*s\n", token->line, blue, reset, line_length, line_start);
+    fprintf(stderr, "   %s|%s ", blue, reset);
+
+    // Print the pointer
+    int column = token->column;
+    for (int i = 1; i < column; i++) {
+        fprintf(stderr, " ");
+    }
+    fprintf(stderr, "%s^", red);
+    for (int i = 1; i < token->length; i++) {
+        fprintf(stderr, "^");
+    }
+    fprintf(stderr, "%s\n", reset);
+
     parser.had_error = true;
 }
 
