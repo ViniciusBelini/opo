@@ -88,6 +88,20 @@ Parser parser;
 CompilerState* current_compiler = NULL;
 Chunk* current_chunk = NULL;
 static const char* active_prefix = NULL;
+static int popped_local = -1;
+static int next_push_local = -1;
+
+static void expression();
+static Type parse_type();
+static bool match(TokenType type);
+static void add_local(Token name, Type type);
+static void block();
+static Type type_pop();
+static bool is_assignable(Type expected, Type actual);
+static Type type_push(Type type);
+static void function_expression();
+static void call_expr();
+static void parse_function(bool is_expression, bool is_public, const char* prefix);
 
 static void error_at(Token* token, const char* message) {
     if (parser.panic_mode) return;
@@ -190,6 +204,163 @@ static void emit_push_func(int64_t addr, Type type) {
     emit_byte((uint8_t)type);
 }
 
+static void parse_function(bool is_expression, bool is_public, const char* prefix) {
+    int jump_over = current_chunk->count;
+    emit_byte(OP_JUMP);
+    emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0);
+
+    Token params[16]; Type param_types[16]; int param_count = 0;
+    while (parser.current.type != TOKEN_RANGLE) {
+        consume(TOKEN_ID, "Expect param name");
+        params[param_count] = parser.previous;
+        consume(TOKEN_COLON, "Expect :");
+        param_types[param_count] = parse_type();
+        param_count++;
+        if (parser.current.type == TOKEN_COMMA) advance();
+    }
+    consume(TOKEN_RANGLE, "Expect '>' after parameters.");
+    consume(TOKEN_ARROW, "Expect '->' after parameters.");
+    Type return_type = parse_type();
+
+    bool has_name = false;
+    Token name;
+    if (match(TOKEN_COLON)) {
+        consume(TOKEN_ID, "Expect function name");
+        name = parser.previous;
+        has_name = true;
+    }
+
+    int func_addr = current_chunk->count;
+    Function* func = NULL;
+    if (has_name && (!is_expression || current_compiler->scope_depth == 0)) {
+        func = &current_compiler->functions[current_compiler->function_count++];
+        if (prefix != NULL) {
+            char* new_name = malloc(strlen(prefix) + name.length + 1);
+            strcpy(new_name, prefix);
+            strncat(new_name, name.start, name.length);
+            func->name.start = new_name;
+            func->name.length = (int)strlen(new_name);
+        } else {
+            func->name = name;
+        }
+        func->addr = func_addr;
+        func->return_type = return_type; func->param_count = param_count;
+        func->is_public = is_public;
+        for (int i = 0; i < param_count; i++) func->param_types[i] = param_types[i];
+    }
+
+    int old_local_count = current_compiler->local_count;
+    int old_scope_depth = current_compiler->scope_depth;
+    Type old_return_type = current_compiler->current_return_type;
+    int old_type_ptr = current_compiler->type_stack_ptr;
+
+    current_compiler->local_count = 0;
+    current_compiler->scope_depth = 0;
+    current_compiler->current_return_type = return_type;
+    current_compiler->type_stack_ptr = 0;
+
+    for (int i = 0; i < param_count; i++) add_local(params[i], param_types[i]);
+    for (int i = param_count - 1; i >= 0; i--) emit_bytes(OP_STORE, (uint8_t)i);
+
+    block();
+
+    Type actual_ret = type_pop();
+    if (!is_assignable(return_type, actual_ret)) {
+        error_at(&parser.previous, "Function return type mismatch.");
+    }
+    emit_byte(OP_RET);
+
+    patch_int32(jump_over + 1, current_chunk->count);
+
+    current_compiler->local_count = old_local_count;
+    current_compiler->scope_depth = old_scope_depth;
+    current_compiler->current_return_type = old_return_type;
+    current_compiler->type_stack_ptr = old_type_ptr;
+
+    Type func_type;
+    switch (return_type) {
+        case VAL_INT: func_type = VAL_FUNC_INT; break;
+        case VAL_FLT: func_type = VAL_FUNC_FLT; break;
+        case VAL_BOOL: func_type = VAL_FUNC_BOOL; break;
+        case VAL_STR: func_type = VAL_FUNC_STR; break;
+        case VAL_VOID: func_type = VAL_FUNC_VOID; break;
+        default: func_type = VAL_FUNC; break;
+    }
+
+    if (is_expression) {
+        emit_push_func(func_addr, func_type);
+        type_push(func_type);
+        if (has_name && current_compiler->scope_depth > 0) {
+            add_local(name, func_type);
+            emit_bytes(OP_STORE, (uint8_t)(current_compiler->local_count - 1));
+            type_pop();
+            // Push it back since it's an expression and should return the value
+            emit_bytes(OP_LOAD, (uint8_t)(current_compiler->local_count - 1));
+            type_push(func_type);
+        }
+    }
+}
+
+static void function_expression() {
+    parse_function(true, false, NULL);
+}
+
+static void call_expr() {
+    Type lhs_type = type_pop();
+    int lhs_local = popped_local;
+
+    if (TYPE_KIND(lhs_type) < VAL_FUNC || TYPE_KIND(lhs_type) > VAL_FUNC_VOID) {
+        if (lhs_type != VAL_ANY) {
+            char msg[100];
+            sprintf(msg, "Cannot call non-function type (kind %d).", TYPE_KIND(lhs_type));
+            error_at(&parser.previous, msg);
+        }
+    }
+
+    // In Opo, OP_INVOKE expects the function object ON TOP of the arguments.
+    // If it's an expression result already on the stack, we must move it.
+    // We'll use a temporary local for this.
+    int tmp_func_local = -1;
+    if (lhs_local == -1) {
+        tmp_func_local = current_compiler->local_count++;
+        emit_bytes(OP_STORE, (uint8_t)tmp_func_local);
+    }
+
+    int arg_count = 0;
+    if (parser.current.type != TOKEN_RPAREN) {
+        do {
+            expression();
+            type_pop();
+            arg_count++;
+        } while (match(TOKEN_COMMA));
+    }
+    consume(TOKEN_RPAREN, "Expect ')' after arguments.");
+
+    if (lhs_local != -1) {
+        emit_bytes(OP_LOAD, (uint8_t)lhs_local);
+    } else {
+        emit_bytes(OP_LOAD, (uint8_t)tmp_func_local);
+        current_compiler->local_count--; // Release temporary local
+    }
+
+    if (current_compiler->is_go) {
+        emit_bytes(OP_GO, (uint8_t)arg_count);
+    } else {
+        emit_bytes(OP_INVOKE, (uint8_t)arg_count);
+    }
+
+    Type ret_type = VAL_ANY;
+    switch (TYPE_KIND(lhs_type)) {
+        case VAL_FUNC_INT: ret_type = VAL_INT; break;
+        case VAL_FUNC_FLT: ret_type = VAL_FLT; break;
+        case VAL_FUNC_BOOL: ret_type = VAL_BOOL; break;
+        case VAL_FUNC_STR: ret_type = VAL_STR; break;
+        case VAL_FUNC_VOID: ret_type = VAL_VOID; break;
+        case VAL_FUNC: ret_type = VAL_ANY; break;
+    }
+    type_push(ret_type);
+}
+
 static int add_string(const char* start, int length) {
     if (current_chunk->strings_count >= current_chunk->strings_capacity) {
         current_chunk->strings_capacity = current_chunk->strings_capacity < 8 ? 8 : current_chunk->strings_capacity * 2;
@@ -201,8 +372,6 @@ static int add_string(const char* start, int length) {
     current_chunk->strings[current_chunk->strings_count] = s;
     return current_chunk->strings_count++;
 }
-
-static void expression();
 
 static int resolve_local(CompilerState* state, Token* name) {
     for (int i = state->local_count - 1; i >= 0; i--) {
@@ -342,7 +511,6 @@ static void add_local(Token name, Type type) {
     local->guarded_variant = -1;
 }
 
-static int next_push_local = -1;
 static Type type_push(Type type) {
     if (current_compiler->type_stack_ptr >= STACK_MAX) {
         error_at(&parser.current, "Compile-time type stack overflow.");
@@ -353,7 +521,6 @@ static Type type_push(Type type) {
     return type;
 }
 
-static int popped_local = -1;
 static Type type_pop() {
     if (current_compiler->type_stack_ptr <= 0) {
         error_at(&parser.current, "Compile-time type stack underflow.");
@@ -361,8 +528,9 @@ static Type type_pop() {
         return VAL_VOID;
     }
     current_compiler->type_stack_ptr--;
+    Type type = current_compiler->type_stack[current_compiler->type_stack_ptr];
     popped_local = current_compiler->local_stack[current_compiler->type_stack_ptr];
-    return current_compiler->type_stack[current_compiler->type_stack_ptr];
+    return type;
 }
 
 static Type parse_type() {
@@ -994,6 +1162,10 @@ static void variable() {
         if (match(TOKEN_LPAREN)) {
             if (TYPE_KIND(type) == VAL_ANY) {
                 error_at(&name, "Cannot call a value of type 'any'. Match it to a function type first.");
+            } else if (TYPE_KIND(type) < VAL_FUNC || TYPE_KIND(type) > VAL_FUNC_VOID) {
+                char msg[100];
+                sprintf(msg, "Cannot call non-function type (kind %d).", TYPE_KIND(type));
+                error_at(&name, msg);
             }
             int arg_count = 0;
             if (parser.current.type != TOKEN_RPAREN) {
@@ -1423,10 +1595,7 @@ static void assignment() {
 }
 
 static void print_op() {
-    Type t = type_pop();
-    if (t == VAL_ANY) {
-        error_at(&parser.previous, "Cannot print 'any'. Match it to a concrete type first.");
-    }
+    type_pop(); // Pop the value being printed
     emit_byte(OP_PRINT);
     type_push(VAL_VOID);
 }
@@ -1493,11 +1662,11 @@ ParseRule rules[] = {
     [TOKEN_OR]        = {NULL,     binary,     PREC_OR},
     [TOKEN_EQ_EQ]     = {NULL,     binary,     PREC_EQUALITY},
     [TOKEN_BANG_EQ]   = {NULL,     binary,     PREC_EQUALITY},
-    [TOKEN_LANGLE]    = {NULL,     binary,     PREC_COMPARISON},
+    [TOKEN_LANGLE]    = {function_expression, binary, PREC_COMPARISON},
     [TOKEN_RANGLE]    = {NULL,     binary,     PREC_COMPARISON},
     [TOKEN_LTE]       = {NULL,     binary,     PREC_COMPARISON},
     [TOKEN_GTE]       = {NULL,     binary,     PREC_COMPARISON},
-    [TOKEN_LPAREN]    = {grouping, NULL,       PREC_NONE},
+    [TOKEN_LPAREN]    = {grouping, call_expr,  PREC_CALL},
     [TOKEN_LBRACKET]  = {array_literal, NULL,  PREC_NONE},
     [TOKEN_LBRACE]    = {map_literal,   NULL,  PREC_NONE},
     [TOKEN_L_ARROW]   = {unary_larrow,  binary_larrow, PREC_ASSIGNMENT},
@@ -1521,7 +1690,7 @@ static ParseRule* get_rule(TokenType type) {
     return &rules[type];
 }
 
-static void parse_precedence(Precedence precedence) {
+static void parse_precedence(Precedence prec) {
     advance();
     ParseFn prefix_rule = get_rule(parser.previous.type)->prefix;
     if (prefix_rule == NULL) {
@@ -1529,7 +1698,7 @@ static void parse_precedence(Precedence precedence) {
         return;
     }
     prefix_rule();
-    while (precedence <= get_rule(parser.current.type)->precedence) {
+    while (prec <= get_rule(parser.current.type)->precedence) {
         advance();
         ParseFn infix_rule = get_rule(parser.previous.type)->infix;
         infix_rule();
@@ -1663,60 +1832,8 @@ static void compile_internal(const char* prefix) {
         }
 
         if (parser.current.type == TOKEN_LANGLE) {
-            int jump_over = current_chunk->count;
-            emit_byte(OP_JUMP);
-            emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0);
             advance();
-            Token params[16]; Type param_types[16]; int param_count = 0;
-            while (parser.current.type != TOKEN_RANGLE) {
-                consume(TOKEN_ID, "Expect param name");
-                params[param_count] = parser.previous;
-                consume(TOKEN_COLON, "Expect :");
-                param_types[param_count] = parse_type();
-                param_count++;
-                if (parser.current.type == TOKEN_COMMA) advance();
-            }
-            advance(); // >
-            consume(TOKEN_ARROW, "Expect -> after args");
-            Type return_type = parse_type();
-            consume(TOKEN_COLON, "Expect : after ret type");
-            consume(TOKEN_ID, "Expect function name");
-            
-            Token name = parser.previous;
-            Function* func = &current_compiler->functions[current_compiler->function_count++];
-            
-            if (prefix != NULL) {
-                char* new_name = malloc(strlen(prefix) + name.length + 1);
-                strcpy(new_name, prefix);
-                strncat(new_name, name.start, name.length);
-                func->name.start = new_name;
-                func->name.length = (int)strlen(new_name);
-            } else {
-                func->name = name;
-            }
-
-            func->addr = current_chunk->count;
-            func->return_type = return_type; func->param_count = param_count;
-            func->is_public = is_public;
-            for (int i = 0; i < param_count; i++) func->param_types[i] = param_types[i];
-            int old_local_count = current_compiler->local_count;
-            current_compiler->local_count = 0;
-            for (int i = 0; i < param_count; i++) add_local(params[i], param_types[i]);
-            for (int i = param_count - 1; i >= 0; i--) emit_bytes(OP_STORE, (uint8_t)i);
-            
-            Type old_return_type = current_compiler->current_return_type;
-            current_compiler->current_return_type = return_type;
-            
-            block();
-            Type actual_ret = type_pop();
-            if (!is_assignable(return_type, actual_ret)) {
-                error_at(&name, "Function return type mismatch.");
-            }
-            emit_byte(OP_RET);
-            patch_int32(jump_over + 1, current_chunk->count);
-            current_compiler->local_count = old_local_count;
-            current_compiler->current_return_type = old_return_type;
-            current_compiler->type_stack_ptr = 0;
+            parse_function(false, is_public, prefix);
             continue;
         }
 

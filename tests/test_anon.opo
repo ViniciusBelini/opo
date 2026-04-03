@@ -1,0 +1,12 @@
+<> -> void: main [
+    # Anonymous function assigned to a local
+    <n: int> -> int [ n * 2 ] => double: fun
+    double(21) !! ; # Should print 42
+
+    # Anonymous function called immediately
+    (<n: int> -> int [ n + 1 ])(10) !! ; # Should print 11
+
+    # Nested named function
+    <a: int, b: int> -> int: add [ a + b ]
+    add(5, 5) !! ; # Should print 10
+]
