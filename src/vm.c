@@ -19,7 +19,8 @@
 
 void retain(Value val) {
     int kind = TYPE_KIND(val.type);
-    if ((kind == VAL_OBJ || kind == VAL_MAP || kind == VAL_ENUM || kind == VAL_CHAN) && val.as.obj != NULL) {
+    if ((kind == VAL_OBJ || kind == VAL_MAP || kind == VAL_ENUM || kind == VAL_CHAN ||
+         (kind >= VAL_FUNC && kind <= VAL_FUNC_VOID)) && val.as.obj != NULL) {
         atomic_fetch_add(&val.as.obj->ref_count, 1);
     }
 }
@@ -84,6 +85,9 @@ static void free_object(HeapObject* obj) {
             for (int i = 0; i < chan->count; i++) {
                 release(chan->buffer[(chan->head + i) % chan->capacity]);
             }
+            if (chan->has_unbuffered_value) {
+                release(chan->unbuffered_value);
+            }
             free(chan->buffer);
             pthread_mutex_destroy(&chan->mutex);
             pthread_cond_destroy(&chan->send_cond);
@@ -91,16 +95,36 @@ static void free_object(HeapObject* obj) {
             free(chan);
             break;
         }
+        case OBJ_CLOSURE: {
+            ObjClosure* closure = (ObjClosure*)obj;
+            for (int i = 0; i < closure->capture_count; i++) {
+                release(closure->captures[i]);
+            }
+            free(closure);
+            break;
+        }
     }
 }
 
 void release(Value val) {
     int kind = TYPE_KIND(val.type);
-    if ((kind == VAL_OBJ || kind == VAL_MAP || kind == VAL_ENUM || kind == VAL_CHAN) && val.as.obj != NULL) {
+    if ((kind == VAL_OBJ || kind == VAL_MAP || kind == VAL_ENUM || kind == VAL_CHAN ||
+         (kind >= VAL_FUNC && kind <= VAL_FUNC_VOID)) && val.as.obj != NULL) {
         if (atomic_fetch_sub(&val.as.obj->ref_count, 1) == 1) {
             free_object(val.as.obj);
         }
     }
+}
+
+static ObjClosure* allocate_closure(VM* vm, int64_t addr, Type fn_type, int capture_count) {
+    (void)vm;
+    ObjClosure* closure = malloc(sizeof(ObjClosure) + sizeof(Value) * capture_count);
+    closure->obj.type = OBJ_CLOSURE;
+    closure->obj.ref_count = 0;
+    closure->addr = addr;
+    closure->fn_type = fn_type;
+    closure->capture_count = capture_count;
+    return closure;
 }
 
 ObjString* allocate_string(VM* vm, const char* chars, int length) {
@@ -144,11 +168,14 @@ ObjChan* allocate_chan(VM* vm, int capacity) {
     ObjChan* chan = malloc(sizeof(ObjChan));
     chan->obj.type = OBJ_CHAN;
     chan->obj.ref_count = 0;
-    chan->capacity = capacity > 0 ? capacity : 1;
-    chan->buffer = malloc(sizeof(Value) * chan->capacity);
+    chan->capacity = capacity >= 0 ? capacity : 0;
+    chan->buffer = chan->capacity > 0 ? malloc(sizeof(Value) * chan->capacity) : NULL;
     chan->count = 0;
     chan->head = 0;
     chan->tail = 0;
+    chan->waiting_receivers = 0;
+    chan->has_unbuffered_value = false;
+    chan->unbuffered_value = (Value){VAL_VOID, {0}};
     chan->closed = false;
     pthread_mutex_init(&chan->mutex, NULL);
     pthread_cond_init(&chan->send_cond, NULL);
@@ -1471,6 +1498,24 @@ typedef struct {
     Value args[32];
 } ThreadArgs;
 
+static void begin_call(VM* vm, int32_t addr, int return_addr, ObjClosure* closure) {
+    if (vm->frame_ptr >= FRAMES_MAX) {
+        runtime_error(vm, "Stack overflow (frames)\n");
+        return;
+    }
+    int current_offset = vm->frame_ptr * LOCALS_PER_FRAME;
+    CallFrame* frame = &vm->frames[vm->frame_ptr++];
+    frame->return_addr = return_addr;
+    frame->locals_offset = current_offset;
+    if (closure != NULL) {
+        for (int i = 0; i < closure->capture_count; i++) {
+            retain(closure->captures[i]);
+            vm->locals[current_offset + i] = closure->captures[i];
+        }
+    }
+    vm->ip = addr;
+}
+
 static void* thread_routine(void* arg) {
     ThreadArgs* targs = (ThreadArgs*)arg;
     VM* vm = targs->vm;
@@ -1478,13 +1523,17 @@ static void* thread_routine(void* arg) {
     if (TYPE_KIND(targs->callable.type) == VAL_OBJ && targs->callable.as.obj->type == OBJ_NATIVE) {
         ObjNative* native = (ObjNative*)targs->callable.as.obj;
         native->function(vm, targs->arg_count, targs->args);
+    } else if (TYPE_KIND(targs->callable.type) >= VAL_FUNC && TYPE_KIND(targs->callable.type) <= VAL_FUNC_VOID &&
+               targs->callable.as.obj != NULL && targs->callable.as.obj->type == OBJ_CLOSURE) {
+        ObjClosure* closure = (ObjClosure*)targs->callable.as.obj;
+        begin_call(vm, (int32_t)closure->addr, -1, closure);
+        for (int i = 0; i < targs->arg_count; i++) {
+            vm_push(vm, targs->args[i]);
+        }
+        vm_run(vm);
     } else {
         int32_t addr = (int32_t)targs->callable.as.i_val;
-        int current_offset = vm->frame_ptr * LOCALS_PER_FRAME;
-        CallFrame* frame = &vm->frames[vm->frame_ptr++];
-        frame->return_addr = -1;
-        frame->locals_offset = current_offset;
-        vm->ip = addr;
+        begin_call(vm, addr, -1, NULL);
         
         for (int i = 0; i < targs->arg_count; i++) {
             vm_push(vm, targs->args[i]);
@@ -1850,12 +1899,7 @@ void vm_run(VM* vm) {
             }
             case OP_CALL: {
                 int32_t addr = read_int32(vm);
-                if (vm->frame_ptr >= FRAMES_MAX) { runtime_error(vm, "Stack overflow (frames)\n"); }
-                int current_offset = vm->frame_ptr * LOCALS_PER_FRAME;
-                CallFrame* frame = &vm->frames[vm->frame_ptr++];
-                frame->return_addr = vm->ip;
-                frame->locals_offset = current_offset;
-                vm->ip = addr;
+                begin_call(vm, addr, vm->ip, NULL);
                 break;
             }
             case OP_RET: {
@@ -1881,7 +1925,12 @@ void vm_run(VM* vm) {
             case OP_PUSH_FUNC: {
                 int64_t addr = read_int64(vm);
                 uint8_t type = vm->code[vm->ip++];
-                vm_push(vm, (Value){(ValueType)type, {.i_val = addr}});
+                uint8_t capture_count = vm->code[vm->ip++];
+                ObjClosure* closure = allocate_closure(vm, addr, (Type)type, capture_count);
+                for (int i = capture_count - 1; i >= 0; i--) {
+                    closure->captures[i] = vm_pop(vm);
+                }
+                vm_push(vm, (Value){(ValueType)type, {.obj = (HeapObject*)closure}});
                 break;
             }
             case OP_INDEX: {
@@ -2163,13 +2212,13 @@ void vm_run(VM* vm) {
                     vm_push(vm, result);
                     release(result); release(callable);
                 } else if (TYPE_KIND(callable.type) >= VAL_FUNC || TYPE_KIND(callable.type) == VAL_INT) {
-                    int32_t addr = (int32_t)callable.as.i_val;
+                    if (callable.as.obj != NULL && callable.as.obj->type == OBJ_CLOSURE) {
+                        ObjClosure* closure = (ObjClosure*)callable.as.obj;
+                        begin_call(vm, (int32_t)closure->addr, vm->ip, closure);
+                    } else {
+                        begin_call(vm, (int32_t)callable.as.i_val, vm->ip, NULL);
+                    }
                     release(callable);
-                    if (vm->frame_ptr >= FRAMES_MAX) { runtime_error(vm, "Stack overflow\n"); }
-                    int current_offset = vm->frame_ptr * LOCALS_PER_FRAME;
-                    CallFrame* frame = &vm->frames[vm->frame_ptr++];
-                    frame->return_addr = vm->ip; frame->locals_offset = current_offset;
-                    vm->ip = addr;
                 } else { fprintf(stderr, "Can only invoke functions or natives. Type: %d\n", TYPE_KIND(callable.type)); exit(1); }
                 break;
             }
@@ -2207,22 +2256,47 @@ void vm_run(VM* vm) {
                 ObjChan* chan = (ObjChan*)chan_val.as.obj;
                 
                 pthread_mutex_lock(&chan->mutex);
-                while (chan->count == chan->capacity && !chan->closed) {
-                    pthread_cond_wait(&chan->send_cond, &chan->mutex);
+                if (chan->capacity == 0) {
+                    while (!chan->closed && (chan->waiting_receivers == 0 || chan->has_unbuffered_value)) {
+                        pthread_cond_wait(&chan->send_cond, &chan->mutex);
+                    }
+
+                    if (chan->closed) {
+                        pthread_mutex_unlock(&chan->mutex);
+                        release(chan_val);
+                        release(val);
+                        runtime_error(vm, "Send on closed channel");
+                        break;
+                    }
+
+                    retain(val);
+                    chan->unbuffered_value = val;
+                    chan->has_unbuffered_value = true;
+                    pthread_cond_signal(&chan->recv_cond);
+
+                    while (!chan->closed && chan->has_unbuffered_value) {
+                        pthread_cond_wait(&chan->send_cond, &chan->mutex);
+                    }
+                } else {
+                    while (chan->count == chan->capacity && !chan->closed) {
+                        pthread_cond_wait(&chan->send_cond, &chan->mutex);
+                    }
+                    
+                    if (chan->closed) {
+                        pthread_mutex_unlock(&chan->mutex);
+                        release(chan_val);
+                        release(val);
+                        runtime_error(vm, "Send on closed channel");
+                        break;
+                    }
+                    
+                    retain(val);
+                    chan->buffer[chan->tail] = val;
+                    chan->tail = (chan->tail + 1) % chan->capacity;
+                    chan->count++;
+                    
+                    pthread_cond_signal(&chan->recv_cond);
                 }
-                
-                if (chan->closed) {
-                    pthread_mutex_unlock(&chan->mutex);
-                    runtime_error(vm, "Send on closed channel");
-                    break;
-                }
-                
-                retain(val);
-                chan->buffer[chan->tail] = val;
-                chan->tail = (chan->tail + 1) % chan->capacity;
-                chan->count++;
-                
-                pthread_cond_signal(&chan->recv_cond);
                 pthread_mutex_unlock(&chan->mutex);
                 
                 release(chan_val); release(val);
@@ -2233,22 +2307,45 @@ void vm_run(VM* vm) {
                 ObjChan* chan = (ObjChan*)chan_val.as.obj;
                 
                 pthread_mutex_lock(&chan->mutex);
-                while (chan->count == 0 && !chan->closed) {
-                    pthread_cond_wait(&chan->recv_cond, &chan->mutex);
+                Value val;
+                if (chan->capacity == 0) {
+                    chan->waiting_receivers++;
+                    pthread_cond_signal(&chan->send_cond);
+                    while (!chan->has_unbuffered_value && !chan->closed) {
+                        pthread_cond_wait(&chan->recv_cond, &chan->mutex);
+                    }
+
+                    if (!chan->has_unbuffered_value && chan->closed) {
+                        chan->waiting_receivers--;
+                        pthread_mutex_unlock(&chan->mutex);
+                        vm_push(vm, (Value){VAL_VOID, {0}});
+                        release(chan_val);
+                        break;
+                    }
+
+                    val = chan->unbuffered_value;
+                    chan->unbuffered_value = (Value){VAL_VOID, {0}};
+                    chan->has_unbuffered_value = false;
+                    chan->waiting_receivers--;
+                    pthread_cond_signal(&chan->send_cond);
+                } else {
+                    while (chan->count == 0 && !chan->closed) {
+                        pthread_cond_wait(&chan->recv_cond, &chan->mutex);
+                    }
+                    
+                    if (chan->count == 0 && chan->closed) {
+                        pthread_mutex_unlock(&chan->mutex);
+                        vm_push(vm, (Value){VAL_VOID, {0}});
+                        release(chan_val);
+                        break;
+                    }
+                    
+                    val = chan->buffer[chan->head];
+                    chan->head = (chan->head + 1) % chan->capacity;
+                    chan->count--;
+                    
+                    pthread_cond_signal(&chan->send_cond);
                 }
-                
-                if (chan->count == 0 && chan->closed) {
-                    pthread_mutex_unlock(&chan->mutex);
-                    vm_push(vm, (Value){VAL_VOID, {0}});
-                    release(chan_val);
-                    break;
-                }
-                
-                Value val = chan->buffer[chan->head];
-                chan->head = (chan->head + 1) % chan->capacity;
-                chan->count--;
-                
-                pthread_cond_signal(&chan->send_cond);
                 pthread_mutex_unlock(&chan->mutex);
                 
                 vm_push(vm, val);

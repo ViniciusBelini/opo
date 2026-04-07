@@ -1,0 +1,4 @@
+<> -> void: main [
+    10 => x
+    "hello" => x
+]

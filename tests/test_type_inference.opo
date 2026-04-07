@@ -1,0 +1,12 @@
+<> -> void: main [
+    10 => x
+    x + 1 !!
+
+    <a: int, b: int>: add [
+        a + b
+    ]
+    add(10, 20) !!
+
+    <n: int> [ n * 2 ] => double
+    double(21) !!
+]

@@ -1,0 +1,16 @@
+<> -> void: main [
+    10 => x
+    [x] <> -> int: get_x [
+        x
+    ]
+    20 => x
+    get_x() !!
+    x !!
+
+    [x] <> -> void: set_local [
+        99 => x
+        x !!
+    ]
+    set_local()
+    x !!
+]

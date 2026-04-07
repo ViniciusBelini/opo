@@ -100,7 +100,8 @@ typedef enum {
     OBJ_NATIVE,
     OBJ_MAP,
     OBJ_ENUM,
-    OBJ_CHAN
+    OBJ_CHAN,
+    OBJ_CLOSURE
 } ObjType;
 
 struct HeapObject {
@@ -171,5 +172,13 @@ typedef struct {
     NativeFn function;
     const char* name;
 } ObjNative;
+
+typedef struct {
+    HeapObject obj;
+    int64_t addr;
+    Type fn_type;
+    int capture_count;
+    Value captures[];
+} ObjClosure;
 
 #endif

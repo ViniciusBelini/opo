@@ -65,6 +65,12 @@ typedef struct {
 } Native;
 
 typedef struct {
+    Token name;
+    Type type;
+    int local_index;
+} CaptureSpec;
+
+typedef struct {
     Local locals[256];
     int local_count;
     Function functions[256];
@@ -90,6 +96,8 @@ Chunk* current_chunk = NULL;
 static const char* active_prefix = NULL;
 static int popped_local = -1;
 static int next_push_local = -1;
+static CaptureSpec pending_captures[16];
+static int pending_capture_count = 0;
 
 static void expression();
 static Type parse_type();
@@ -99,9 +107,18 @@ static void block();
 static Type type_pop();
 static bool is_assignable(Type expected, Type actual);
 static Type type_push(Type type);
+static int resolve_local(CompilerState* state, Token* name);
 static void function_expression();
 static void call_expr();
+static void array_literal();
 static void parse_function(bool is_expression, bool is_public, const char* prefix);
+static bool has_implicit_terminator();
+static bool match_statement_terminator();
+static Type function_type_from_return(Type return_type);
+static Type unify_inferred_types(Type current, Type next);
+static bool is_capture_list_ahead();
+static int parse_capture_list(CaptureSpec* captures, int max_captures);
+static void captured_function_expression();
 
 static void error_at(Token* token, const char* message) {
     if (parser.panic_mode) return;
@@ -164,6 +181,36 @@ static void consume(TokenType type, const char* message) {
     error_at(&parser.current, message);
 }
 
+static bool token_can_end_statement(TokenType type) {
+    switch (type) {
+        case TOKEN_INT:
+        case TOKEN_FLT:
+        case TOKEN_STR:
+        case TOKEN_BOOL:
+        case TOKEN_ID:
+        case TOKEN_NONE:
+        case TOKEN_RPAREN:
+        case TOKEN_RBRACKET:
+        case TOKEN_RBRACE:
+        case TOKEN_BANG_BANG:
+        case TOKEN_DOT:
+        case TOKEN_DOT_DOT:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool has_implicit_terminator() {
+    return parser.current.line > parser.previous.line &&
+           token_can_end_statement(parser.previous.type);
+}
+
+static bool match_statement_terminator() {
+    if (match(TOKEN_SEMICOLON)) return true;
+    return has_implicit_terminator();
+}
+
 static void emit_byte(uint8_t byte) {
     if (current_chunk->count >= current_chunk->capacity) {
         current_chunk->capacity = current_chunk->capacity < 8 ? 8 : current_chunk->capacity * 2;
@@ -196,15 +243,21 @@ static void emit_int(int64_t val) {
     }
 }
 
-static void emit_push_func(int64_t addr, Type type) {
+static void emit_push_func(int64_t addr, Type type, int capture_count) {
     emit_byte(OP_PUSH_FUNC);
     for (int i = 0; i < 8; i++) {
         emit_byte((addr >> (i * 8)) & 0xFF);
     }
     emit_byte((uint8_t)type);
+    emit_byte((uint8_t)capture_count);
 }
 
 static void parse_function(bool is_expression, bool is_public, const char* prefix) {
+    CaptureSpec captures[16];
+    int capture_count = pending_capture_count;
+    for (int i = 0; i < capture_count; i++) captures[i] = pending_captures[i];
+    pending_capture_count = 0;
+
     int jump_over = current_chunk->count;
     emit_byte(OP_JUMP);
     emit_byte(0); emit_byte(0); emit_byte(0); emit_byte(0);
@@ -219,8 +272,8 @@ static void parse_function(bool is_expression, bool is_public, const char* prefi
         if (parser.current.type == TOKEN_COMMA) advance();
     }
     consume(TOKEN_RANGLE, "Expect '>' after parameters.");
-    consume(TOKEN_ARROW, "Expect '->' after parameters.");
-    Type return_type = parse_type();
+    bool has_explicit_return_type = match(TOKEN_ARROW);
+    Type return_type = has_explicit_return_type ? parse_type() : VAL_NONE;
 
     bool has_name = false;
     Token name;
@@ -259,14 +312,24 @@ static void parse_function(bool is_expression, bool is_public, const char* prefi
     current_compiler->current_return_type = return_type;
     current_compiler->type_stack_ptr = 0;
 
+    for (int i = 0; i < capture_count; i++) add_local(captures[i].name, captures[i].type);
     for (int i = 0; i < param_count; i++) add_local(params[i], param_types[i]);
-    for (int i = param_count - 1; i >= 0; i--) emit_bytes(OP_STORE, (uint8_t)i);
+    for (int i = param_count - 1; i >= 0; i--) emit_bytes(OP_STORE, (uint8_t)(capture_count + i));
 
     block();
 
     Type actual_ret = type_pop();
-    if (!is_assignable(return_type, actual_ret)) {
-        error_at(&parser.previous, "Function return type mismatch.");
+    if (has_explicit_return_type) {
+        if (!is_assignable(return_type, actual_ret)) {
+            error_at(&parser.previous, "Function return type mismatch.");
+        }
+    } else {
+        Type inferred_return = unify_inferred_types(current_compiler->current_return_type, actual_ret);
+        if (inferred_return == VAL_NONE) {
+            error_at(&parser.previous, "Could not infer a single return type for function.");
+            inferred_return = VAL_VOID;
+        }
+        return_type = inferred_return;
     }
     emit_byte(OP_RET);
 
@@ -277,18 +340,16 @@ static void parse_function(bool is_expression, bool is_public, const char* prefi
     current_compiler->current_return_type = old_return_type;
     current_compiler->type_stack_ptr = old_type_ptr;
 
-    Type func_type;
-    switch (return_type) {
-        case VAL_INT: func_type = VAL_FUNC_INT; break;
-        case VAL_FLT: func_type = VAL_FUNC_FLT; break;
-        case VAL_BOOL: func_type = VAL_FUNC_BOOL; break;
-        case VAL_STR: func_type = VAL_FUNC_STR; break;
-        case VAL_VOID: func_type = VAL_FUNC_VOID; break;
-        default: func_type = VAL_FUNC; break;
+    if (func != NULL) {
+        func->return_type = return_type;
     }
+    Type func_type = function_type_from_return(return_type);
 
     if (is_expression) {
-        emit_push_func(func_addr, func_type);
+        for (int i = 0; i < capture_count; i++) {
+            emit_bytes(OP_LOAD, (uint8_t)captures[i].local_index);
+        }
+        emit_push_func(func_addr, func_type, capture_count);
         type_push(func_type);
         if (has_name && current_compiler->scope_depth > 0) {
             add_local(name, func_type);
@@ -303,6 +364,20 @@ static void parse_function(bool is_expression, bool is_public, const char* prefi
 
 static void function_expression() {
     parse_function(true, false, NULL);
+}
+
+static void captured_function_expression() {
+    parse_function(true, false, NULL);
+}
+
+static void bracket_expression() {
+    if (is_capture_list_ahead()) {
+        pending_capture_count = parse_capture_list(pending_captures, 16);
+        consume(TOKEN_LANGLE, "Expect '<' after capture list.");
+        captured_function_expression();
+    } else {
+        array_literal();
+    }
 }
 
 static void call_expr() {
@@ -439,6 +514,55 @@ static bool match(TokenType type) {
     return true;
 }
 
+static bool is_capture_list_ahead() {
+    Lexer saved_lexer = lexer;
+    Token saved_current = parser.current;
+
+    Token token = parser.current;
+    while (token.type != TOKEN_RBRACKET && token.type != TOKEN_EOF) {
+        if (token.type != TOKEN_ID) {
+            lexer = saved_lexer;
+            return false;
+        }
+        token = lexer_next_token();
+        if (token.type == TOKEN_COMMA) {
+            token = lexer_next_token();
+        } else if (token.type != TOKEN_RBRACKET) {
+            lexer = saved_lexer;
+            return false;
+        }
+    }
+
+    bool result = (token.type == TOKEN_RBRACKET && lexer_next_token().type == TOKEN_LANGLE);
+    lexer = saved_lexer;
+    parser.current = saved_current;
+    return result;
+}
+
+static int parse_capture_list(CaptureSpec* captures, int max_captures) {
+    int capture_count = 0;
+    while (parser.current.type != TOKEN_RBRACKET) {
+        consume(TOKEN_ID, "Expect variable name in capture list.");
+        Token capture_name = parser.previous;
+        int local_index = resolve_local(current_compiler, &capture_name);
+        if (local_index == -1) {
+            error_at(&capture_name, "Can only capture local variables from the parent scope.");
+        } else {
+            if (capture_count >= max_captures) {
+                error_at(&capture_name, "Too many captured variables.");
+            } else {
+                captures[capture_count].name = capture_name;
+                captures[capture_count].type = current_compiler->locals[local_index].type;
+                captures[capture_count].local_index = local_index;
+                capture_count++;
+            }
+        }
+        if (!match(TOKEN_COMMA)) break;
+    }
+    consume(TOKEN_RBRACKET, "Expect ']' after capture list.");
+    return capture_count;
+}
+
 static bool is_assignable(Type expected, Type actual) {
     if (TYPE_KIND(expected) == VAL_ANY) return true;
     if (TYPE_KIND(actual) == VAL_ANY && TYPE_KIND(expected) == VAL_ANY) return true;
@@ -481,6 +605,26 @@ static bool is_assignable(Type expected, Type actual) {
     }
 
     return false;
+}
+
+static Type function_type_from_return(Type return_type) {
+    switch (TYPE_KIND(return_type)) {
+        case VAL_INT: return VAL_FUNC_INT;
+        case VAL_FLT: return VAL_FUNC_FLT;
+        case VAL_BOOL: return VAL_FUNC_BOOL;
+        case VAL_STR: return VAL_FUNC_STR;
+        case VAL_VOID: return VAL_FUNC_VOID;
+        default: return VAL_FUNC;
+    }
+}
+
+static Type unify_inferred_types(Type current, Type next) {
+    if (current == VAL_NONE) return next;
+    if (next == VAL_NONE) return current;
+    if (current == next) return current;
+    if (is_assignable(current, next)) return current;
+    if (is_assignable(next, current)) return next;
+    return VAL_NONE;
 }
 
 static void add_native(const char* name, int index, Type ret, int p_count, ...) {
@@ -1265,8 +1409,11 @@ static void variable() {
                     }
                     consume(TOKEN_RPAREN, "Expect ')' after arguments.");
                     if (arg_count != f->param_count) error_at(&member, "Wrong number of arguments.");
+                    if (f->return_type == VAL_NONE) {
+                        error_at(&member, "Cannot use inferred-return function before its return type is known. Add an explicit return type.");
+                    }
                     if (current_compiler->is_go) {
-                        emit_push_func(f->addr, VAL_FUNC);
+                        emit_push_func(f->addr, VAL_FUNC, 0);
                         emit_bytes(OP_GO, (uint8_t)arg_count);
                     } else {
                         emit_byte(OP_CALL);
@@ -1274,7 +1421,7 @@ static void variable() {
                     }
                     type_push(f->return_type);
                 } else {
-                    emit_push_func(f->addr, VAL_FUNC);
+                    emit_push_func(f->addr, VAL_FUNC, 0);
                     type_push(VAL_FUNC);
                 }
                 return;
@@ -1458,8 +1605,11 @@ static void variable() {
             }
             consume(TOKEN_RPAREN, "Expect ')' after arguments.");
             if (arg_count != f->param_count) error_at(&name, "Wrong number of arguments.");
+            if (f->return_type == VAL_NONE) {
+                error_at(&name, "Cannot use inferred-return function before its return type is known. Add an explicit return type.");
+            }
             if (current_compiler->is_go) {
-                emit_push_func(f->addr, VAL_FUNC);
+                emit_push_func(f->addr, VAL_FUNC, 0);
                 emit_bytes(OP_GO, (uint8_t)arg_count);
             } else {
                 emit_byte(OP_CALL);
@@ -1468,7 +1618,7 @@ static void variable() {
             type_push(f->return_type);
         } else {
             Type f_type = VAL_FUNC;
-            emit_push_func(f->addr, f_type);
+            emit_push_func(f->addr, f_type, 0);
             type_push(f_type);
         }
         return;
@@ -1584,9 +1734,11 @@ static void assignment() {
         }
     } else {
         int arg = resolve_local(current_compiler, &name);
-        if (arg == -1) error_at(&name, "Undefined identifier.");
         Type value_type = type_pop();
-        if (!is_assignable(current_compiler->locals[arg].type, value_type)) {
+        if (arg == -1) {
+            add_local(name, value_type);
+            arg = current_compiler->local_count - 1;
+        } else if (!is_assignable(current_compiler->locals[arg].type, value_type)) {
             error_at(&name, "Type mismatch in assignment.");
         }
         emit_bytes(OP_STORE, (uint8_t)arg);
@@ -1628,8 +1780,10 @@ static void continue_op() {
 
 static void return_op() {
     Type t = VAL_VOID;
-    if (parser.current.type == TOKEN_RBRACKET || parser.current.type == TOKEN_SEMICOLON) {
-        if (!is_assignable(current_compiler->current_return_type, VAL_VOID)) {
+    if (parser.current.type == TOKEN_RBRACKET || parser.current.type == TOKEN_SEMICOLON || has_implicit_terminator()) {
+        if (current_compiler->current_return_type == VAL_NONE) {
+            current_compiler->current_return_type = VAL_VOID;
+        } else if (!is_assignable(current_compiler->current_return_type, VAL_VOID)) {
             error_at(&parser.previous, "Must return a value in non-void function.");
         }
         emit_int(0);
@@ -1637,7 +1791,9 @@ static void return_op() {
     } else {
         expression();
         t = type_pop();
-        if (!is_assignable(current_compiler->current_return_type, t)) {
+        if (current_compiler->current_return_type == VAL_NONE) {
+            current_compiler->current_return_type = t;
+        } else if (!is_assignable(current_compiler->current_return_type, t)) {
             error_at(&parser.previous, "Return type mismatch.");
         }
     }
@@ -1667,7 +1823,7 @@ ParseRule rules[] = {
     [TOKEN_LTE]       = {NULL,     binary,     PREC_COMPARISON},
     [TOKEN_GTE]       = {NULL,     binary,     PREC_COMPARISON},
     [TOKEN_LPAREN]    = {grouping, call_expr,  PREC_CALL},
-    [TOKEN_LBRACKET]  = {array_literal, NULL,  PREC_NONE},
+    [TOKEN_LBRACKET]  = {bracket_expression, NULL,  PREC_NONE},
     [TOKEN_LBRACE]    = {map_literal,   NULL,  PREC_NONE},
     [TOKEN_L_ARROW]   = {unary_larrow,  binary_larrow, PREC_ASSIGNMENT},
     [TOKEN_DOT]       = {break_op, dot,        PREC_CALL},
@@ -1699,6 +1855,7 @@ static void parse_precedence(Precedence prec) {
     }
     prefix_rule();
     while (prec <= get_rule(parser.current.type)->precedence) {
+        if (has_implicit_terminator()) break;
         advance();
         ParseFn infix_rule = get_rule(parser.previous.type)->infix;
         infix_rule();
@@ -2195,7 +2352,7 @@ static void statement() {
             type_push(VAL_VOID);
         }
         patch_int32(jump_patch + 1, current_chunk->count);
-        match(TOKEN_SEMICOLON);
+        match_statement_terminator();
     } else if (parser.current.type == TOKEN_AT) {
         Type cond_type = type_pop();
         int cond_local = popped_local;
@@ -2241,10 +2398,10 @@ static void statement() {
         }
         current_compiler->current_loop = loop.next;
 
-        match(TOKEN_SEMICOLON);
+        match_statement_terminator();
         type_push(VAL_VOID);
     } else {
-        match(TOKEN_SEMICOLON);
+        match_statement_terminator();
     }
 }
 

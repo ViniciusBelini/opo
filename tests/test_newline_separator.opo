@@ -1,0 +1,4 @@
+<> -> void: main [
+    5 => i: int
+    (<n: int> -> int [ n + 1 ])(10) !!
+]

@@ -58,6 +58,9 @@ typedef struct {
     int count;
     int head;
     int tail;
+    int waiting_receivers;
+    bool has_unbuffered_value;
+    Value unbuffered_value;
     pthread_mutex_t mutex;
     pthread_cond_t send_cond;
     pthread_cond_t recv_cond;
