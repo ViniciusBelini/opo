@@ -1,0 +1,26 @@
+"std/http" => http: imp
+
+<ch: chan<int>> -> void: startCount[
+	0 => count
+
+	tru @ [
+		count + 1 => count
+		ch <- count
+	]
+]
+
+<> -> void: main [
+	chan<int>(0) => ch: chan<int>
+	go startCount(ch)
+
+	[ch] <req: http.Request> -> http.Response: home[
+		<-ch => count
+		http.response(200, {"Content-Type" => "text/plain"}, "Visitas nesta página: "+str(count))
+	]
+
+	http.server(8080) => s: http.Server;
+
+	http.handle(s, "/", home)
+
+	http.start(s)
+]

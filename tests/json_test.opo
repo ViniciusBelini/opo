@@ -1,0 +1,47 @@
+"std/json" => json: imp
+
+<> -> void: main [
+    # Test basic serialization
+    { "name" => "Opo", "version" => 1.0, "active" => tru } => lang: {str:any}
+    ["fast", "simple"] => lang."features"
+    
+    json.encode(lang) => s: str
+    println("Compact: " + s)
+
+    # Test pretty-printing
+    json.format(lang, 2) => p: str
+    println("Pretty:")
+    println(p)
+
+    # Test character escaping
+    { "msg" => "Hello\n\"World\"\t!" } => esc: {str:any}
+    json.encode(esc) => s2: str
+    println("Escaped: " + s2)
+
+    # Test parsing
+    json.parse(s2) => res: any!
+    match res [
+        ok(val) [
+            println("Parsed message: " + val."msg")
+        ]
+        err(e) [
+            println("Parse error: " + e)
+        ]
+    ]
+
+    # Test parse_or
+    json.parse_or("invalid json", { "name" => "default" }) => d: any
+    println("Parse or (invalid): " + d."name")
+
+    json.parse_or("{\"name\": \"provided\"}", { "name" => "default" }) => d2: any
+    println("Parse or (valid): " + d2."name")
+
+    # Test complex nesting
+    [ { "id" => 1 }, { "id" => 2 } ] => complex: []any
+    ["a", "b"] => (complex.0)."tags"
+    ["c"] => (complex.1)."tags"
+    
+    json.format(complex, 2) => complex_s: str
+    println("Complex:")
+    println(complex_s)
+]
