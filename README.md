@@ -1,5 +1,7 @@
 # Opo Programming Language
 
+![Opo](https://img.shields.io/badge/language-Opo-E67E22)
+
 Opo is a simple, fast, efficient, and safe programming language designed to be the opposite of Python. It is statically typed, explicit, and predictable.
 
 ## Design Principles
