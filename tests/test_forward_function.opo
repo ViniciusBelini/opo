@@ -1,0 +1,11 @@
+<> -> int: first [
+    second()
+]
+
+<> -> void: main [
+    first() !!
+]
+
+<> -> int: second [
+    42
+]

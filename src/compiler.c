@@ -30,6 +30,8 @@ typedef struct {
     Type param_types[16];
     int param_count;
     bool is_public;
+    int pending_call_patches[64];
+    int pending_call_patch_count;
 } Function;
 
 typedef struct Loop {
@@ -119,6 +121,11 @@ static Type unify_inferred_types(Type current, Type next);
 static bool is_capture_list_ahead();
 static int parse_capture_list(CaptureSpec* captures, int max_captures);
 static void captured_function_expression();
+static void predeclare_module_functions(const char* source, const char* prefix);
+static int find_function(Token name);
+static Token qualify_name(Token name, const char* prefix);
+static void skip_bracket_block_tokens(void);
+static void emit_direct_function_call(Function* func);
 
 static void error_at(Token* token, const char* message) {
     if (parser.panic_mode) return;
@@ -252,6 +259,167 @@ static void emit_push_func(int64_t addr, Type type, int capture_count) {
     emit_byte((uint8_t)capture_count);
 }
 
+static Token qualify_name(Token name, const char* prefix) {
+    if (prefix == NULL) return name;
+
+    char* full_name = malloc(strlen(prefix) + name.length + 1);
+    strcpy(full_name, prefix);
+    strncat(full_name, name.start, name.length);
+
+    Token qualified = name;
+    qualified.start = full_name;
+    qualified.length = (int)strlen(full_name);
+    return qualified;
+}
+
+static int find_function(Token name) {
+    for (int i = 0; i < current_compiler->function_count; i++) {
+        Function* f = &current_compiler->functions[i];
+        if (name.length == f->name.length &&
+            memcmp(name.start, f->name.start, name.length) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void skip_bracket_block_tokens(void) {
+    int depth = 1;
+    while (depth > 0 && parser.current.type != TOKEN_EOF) {
+        if (parser.current.type == TOKEN_LBRACKET) depth++;
+        else if (parser.current.type == TOKEN_RBRACKET) depth--;
+        advance();
+    }
+}
+
+static void emit_direct_function_call(Function* func) {
+    emit_byte(OP_CALL);
+    int patch_offset = current_chunk->count;
+    emit_int32(func->addr);
+    if (func->addr == -1 && func->pending_call_patch_count < 64) {
+        func->pending_call_patches[func->pending_call_patch_count++] = patch_offset;
+    }
+}
+
+static void predeclare_module_functions(const char* source, const char* prefix) {
+    Lexer old_lexer = lexer;
+    Parser old_parser = parser;
+    const char* old_prefix = active_prefix;
+
+    lexer_init(source);
+    parser.had_error = false;
+    parser.panic_mode = false;
+    active_prefix = prefix;
+    advance();
+
+    while (parser.current.type != TOKEN_EOF) {
+        bool is_public = false;
+        if (match(TOKEN_PUB)) is_public = true;
+
+        if (match(TOKEN_STRUCT)) {
+            consume(TOKEN_LBRACKET, "Expect '[' after 'struct'.");
+            skip_bracket_block_tokens();
+            consume(TOKEN_ASSIGN, "Expect '=>' after struct definition.");
+            consume(TOKEN_ID, "Expect struct name.");
+
+            Token name = qualify_name(parser.previous, prefix);
+            bool exists = false;
+            for (int i = 0; i < current_compiler->struct_count; i++) {
+                if (current_compiler->structs[i].name.length == name.length &&
+                    memcmp(current_compiler->structs[i].name.start, name.start, name.length) == 0) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists) {
+                StructDef* sd = &current_compiler->structs[current_compiler->struct_count++];
+                sd->name = name;
+                sd->field_count = 0;
+                sd->is_public = is_public;
+            }
+
+            consume(TOKEN_COLON, "Expect ':'.");
+            consume(TOKEN_TYPE, "Expect 'type' after struct name.");
+            continue;
+        }
+
+        if (match(TOKEN_ENUM)) {
+            consume(TOKEN_LBRACKET, "Expect '[' after 'enum'.");
+            skip_bracket_block_tokens();
+            consume(TOKEN_ASSIGN, "Expect '=>' after enum definition.");
+            consume(TOKEN_ID, "Expect enum name.");
+
+            Token name = qualify_name(parser.previous, prefix);
+            bool exists = false;
+            for (int i = 0; i < current_compiler->enum_count; i++) {
+                if (current_compiler->enums[i].name.length == name.length &&
+                    memcmp(current_compiler->enums[i].name.start, name.start, name.length) == 0) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists) {
+                EnumDef* ed = &current_compiler->enums[current_compiler->enum_count++];
+                ed->name = name;
+                ed->variant_count = 0;
+                ed->is_public = is_public;
+            }
+
+            consume(TOKEN_COLON, "Expect ':'.");
+            consume(TOKEN_TYPE, "Expect 'type' after enum name.");
+            continue;
+        }
+
+        if (parser.current.type == TOKEN_LANGLE) {
+            advance();
+
+            Type param_types[16];
+            int param_count = 0;
+            while (parser.current.type != TOKEN_RANGLE) {
+                consume(TOKEN_ID, "Expect param name");
+                consume(TOKEN_COLON, "Expect :");
+                param_types[param_count++] = parse_type();
+                if (parser.current.type == TOKEN_COMMA) advance();
+            }
+            consume(TOKEN_RANGLE, "Expect '>' after parameters.");
+
+            Type return_type = VAL_NONE;
+            if (match(TOKEN_ARROW)) return_type = parse_type();
+
+            if (match(TOKEN_COLON)) {
+                consume(TOKEN_ID, "Expect function name");
+                Token name = qualify_name(parser.previous, prefix);
+                int func_idx = find_function(name);
+                Function* func = NULL;
+
+                if (func_idx == -1) {
+                    func = &current_compiler->functions[current_compiler->function_count++];
+                    func->name = name;
+                    func->addr = -1;
+                    func->pending_call_patch_count = 0;
+                } else {
+                    func = &current_compiler->functions[func_idx];
+                }
+
+                func->return_type = return_type;
+                func->param_count = param_count;
+                func->is_public = is_public;
+                for (int i = 0; i < param_count; i++) func->param_types[i] = param_types[i];
+            }
+
+            consume(TOKEN_LBRACKET, "Expect '[' before function body.");
+            skip_bracket_block_tokens();
+            continue;
+        }
+
+        advance();
+    }
+
+    lexer = old_lexer;
+    parser = old_parser;
+    active_prefix = old_prefix;
+}
+
 static void parse_function(bool is_expression, bool is_public, const char* prefix) {
     CaptureSpec captures[16];
     int capture_count = pending_capture_count;
@@ -286,20 +454,23 @@ static void parse_function(bool is_expression, bool is_public, const char* prefi
     int func_addr = current_chunk->count;
     Function* func = NULL;
     if (has_name && (!is_expression || current_compiler->scope_depth == 0)) {
-        func = &current_compiler->functions[current_compiler->function_count++];
-        if (prefix != NULL) {
-            char* new_name = malloc(strlen(prefix) + name.length + 1);
-            strcpy(new_name, prefix);
-            strncat(new_name, name.start, name.length);
-            func->name.start = new_name;
-            func->name.length = (int)strlen(new_name);
+        Token qualified_name = qualify_name(name, prefix);
+        int func_idx = find_function(qualified_name);
+        if (func_idx == -1) {
+            func = &current_compiler->functions[current_compiler->function_count++];
+            func->name = qualified_name;
         } else {
-            func->name = name;
+            func = &current_compiler->functions[func_idx];
         }
         func->addr = func_addr;
-        func->return_type = return_type; func->param_count = param_count;
+        func->return_type = return_type;
+        func->param_count = param_count;
         func->is_public = is_public;
         for (int i = 0; i < param_count; i++) func->param_types[i] = param_types[i];
+        for (int i = 0; i < func->pending_call_patch_count; i++) {
+            patch_int32(func->pending_call_patches[i], func_addr);
+        }
+        func->pending_call_patch_count = 0;
     }
 
     int old_local_count = current_compiler->local_count;
@@ -1416,8 +1587,7 @@ static void variable() {
                         emit_push_func(f->addr, VAL_FUNC, 0);
                         emit_bytes(OP_GO, (uint8_t)arg_count);
                     } else {
-                        emit_byte(OP_CALL);
-                        emit_int32(f->addr);
+                        emit_direct_function_call(f);
                     }
                     type_push(f->return_type);
                 } else {
@@ -1612,8 +1782,7 @@ static void variable() {
                 emit_push_func(f->addr, VAL_FUNC, 0);
                 emit_bytes(OP_GO, (uint8_t)arg_count);
             } else {
-                emit_byte(OP_CALL);
-                emit_int32(f->addr);
+                emit_direct_function_call(f);
             }
             type_push(f->return_type);
         } else {
@@ -2053,11 +2222,12 @@ static void handle_import(Token* path_token, Token* alias_token) {
     Lexer old_lexer = lexer;
     Parser old_parser = parser;
     const char* old_prefix = active_prefix;
-    
+
+    predeclare_module_functions(source, prefix);
     lexer_init(source);
     advance();
     active_prefix = prefix;
-    
+
     compile_internal(prefix);
     
     lexer = old_lexer;
@@ -2483,6 +2653,12 @@ Chunk* compiler_compile(const char* source, const char* base_dir, const char* st
     parser.panic_mode = false;
     root_base_dir = (char*)base_dir;
     std_base_dir = (char*)stdlib_dir;
+    predeclare_module_functions(source, NULL);
+    parser.had_error = false;
+    parser.panic_mode = false;
+    active_prefix = NULL;
+    pending_capture_count = 0;
+    lexer_init(source);
     advance();
 
     compile_internal(NULL);
